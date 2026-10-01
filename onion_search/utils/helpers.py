@@ -1,28 +1,34 @@
 """
-Helper utilities and configuration constants.
+Helper utilities, formatting, and string parsing functions with full type annotations.
 """
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
-HEADERS_LIST = [
+from onion_search.config import (
+    CONFIG_DIR,
+    DB_FILE,
+    DEFAULT_DEAD_FILE,
+    DEFAULT_STATE_FILE,
+    DEFAULT_TIMEOUT_GET,
+    STATE_DIR,
+)
+
+HEADERS_LIST: List[Dict[str, str]] = [
     {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"},
     {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"},
 ]
-TIMEOUT_GET = 20
+TIMEOUT_GET: int = DEFAULT_TIMEOUT_GET
+STATE_FILE: Path = DEFAULT_STATE_FILE
+DEAD_FILE: Path = DEFAULT_DEAD_FILE
 
-STATE_DIR = Path.home() / ".config" / "onion_search"
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-STATE_FILE = STATE_DIR / "state_v3.json"
-DEAD_FILE = STATE_DIR / "dead_blacklist.json"
-DB_FILE = STATE_DIR / "onion.db"
-
-GITHUB_SOURCES = [
+GITHUB_SOURCES: List[str] = [
     "https://raw.githubusercontent.com/alecmuffett/real-world-onion-sites/master/real-world-onion-sites.txt"
 ]
 
 
-def fmt_ts(ts):
-    """Format Unix timestamp float into YYYY-MM-DD HH:MM string."""
+def fmt_ts(ts: Optional[Union[float, int, str]]) -> str:
+    """Format Unix timestamp into 'YYYY-MM-DD HH:MM' string."""
     try:
         if not ts:
             return ""
@@ -31,7 +37,7 @@ def fmt_ts(ts):
         return ""
 
 
-def parse_list(s):
+def parse_list(s: Optional[str]) -> List[str]:
     """Parse comma-separated text into a list of stripped, lower-case strings."""
     if not s:
         return []

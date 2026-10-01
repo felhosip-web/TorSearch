@@ -1,62 +1,65 @@
 """
 Content detection: language, category, fingerprint, and crypto address extraction.
 Includes LRU classification caching by fingerprint for high-throughput scraping.
+All functions and classes include comprehensive Python type annotations.
 """
 from collections import OrderedDict
 import hashlib
 import re
 import threading
+from typing import Dict, List, Optional, Pattern, Tuple, Union
 from bs4 import BeautifulSoup
+from onion_search.config import MAX_MEMORY_CACHE_SIZE
 
-BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-BASE58_REGEX = re.compile(r"\b[13][1-9A-HJ-NP-Za-km-z]{25,34}\b")
-BECH32_REGEX = re.compile(r"\bbc1[ac-hj-np-z02-9]{38,60}\b", re.IGNORECASE)
+BASE58_ALPHABET: str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+BASE58_REGEX: Pattern[str] = re.compile(r"\b[13][1-9A-HJ-NP-Za-km-z]{25,34}\b")
+BECH32_REGEX: Pattern[str] = re.compile(r"\bbc1[ac-hj-np-z02-9]{38,60}\b", re.IGNORECASE)
 
 
-def decode_base58(s):
+def decode_base58(s: str) -> bytes:
     """Decode a Base58 string to bytes with leading zeros preserved."""
-    n = 0
+    n: int = 0
     for char in s:
         n = n * 58 + BASE58_ALPHABET.index(char)
-    res = []
+    res: List[int] = []
     while n > 0:
         res.append(n & 0xFF)
         n >>= 8
-    res = bytes(reversed(res))
-    num_zeros = len(s) - len(s.lstrip("1"))
-    return b"\x00" * num_zeros + res
+    raw_bytes: bytes = bytes(reversed(res))
+    num_zeros: int = len(s) - len(s.lstrip("1"))
+    return b"\x00" * num_zeros + raw_bytes
 
 
-def is_valid_base58_address(addr):
+def is_valid_base58_address(addr: str) -> bool:
     """Validate a legacy/P2SH Bitcoin address using Base58Check checksum."""
     if not (26 <= len(addr) <= 35) or addr[0] not in ("1", "3"):
         return False
     try:
-        raw = decode_base58(addr)
+        raw: bytes = decode_base58(addr)
         if len(raw) != 25:
             return False
-        payload = raw[:-4]
-        checksum = raw[-4:]
-        h1 = hashlib.sha256(payload).digest()
-        h2 = hashlib.sha256(h1).digest()
+        payload: bytes = raw[:-4]
+        checksum: bytes = raw[-4:]
+        h1: bytes = hashlib.sha256(payload).digest()
+        h2: bytes = hashlib.sha256(h1).digest()
         return h2[:4] == checksum
     except Exception:
         return False
 
 
-def is_valid_bech32_address(addr):
+def is_valid_bech32_address(addr: str) -> bool:
     """Validate Bech32 Bitcoin address format and character set."""
-    addr_lower = addr.lower()
+    addr_lower: str = addr.lower()
     if not addr_lower.startswith("bc1"):
         return False
     if not (42 <= len(addr_lower) <= 62):
         return False
-    allowed = set("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
-    payload = addr_lower[3:]
+    allowed: set = set("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
+    payload: str = addr_lower[3:]
     return all(c in allowed for c in payload)
 
 
-def validate_bitcoin_address(addr):
+def validate_bitcoin_address(addr: str) -> bool:
     """Check if address is a valid Bitcoin address (Base58Check or Bech32)."""
     if addr.startswith("1") or addr.startswith("3"):
         return is_valid_base58_address(addr)
@@ -65,12 +68,12 @@ def validate_bitcoin_address(addr):
     return False
 
 
-def extract_bitcoin_addresses(text, validate_checksum=True):
+def extract_bitcoin_addresses(text: str, validate_checksum: bool = True) -> List[str]:
     """
     Extract Bitcoin addresses from text.
     Filters out invalid Base58 characters (0, O, I, l) and optionally verifies checksums.
     """
-    candidates = set()
+    candidates: set = set()
     for m in BASE58_REGEX.findall(text):
         candidates.add(m)
     for m in BECH32_REGEX.findall(text):
@@ -79,14 +82,14 @@ def extract_bitcoin_addresses(text, validate_checksum=True):
     if not validate_checksum:
         return list(candidates)
 
-    valid_addrs = []
+    valid_addrs: List[str] = []
     for addr in candidates:
         if validate_bitcoin_address(addr):
             valid_addrs.append(addr)
     return valid_addrs
 
 
-def detect_language(text, html_lang_attr=""):
+def detect_language(text: str, html_lang_attr: str = "") -> str:
     """
     Fast and accurate language detection.
     1. HTML lang attribute fast-path.
@@ -94,39 +97,39 @@ def detect_language(text, html_lang_attr=""):
     3. Langdetect only called when ambiguous.
     """
     if html_lang_attr:
-        l = html_lang_attr.lower().strip()[:2]
+        l: str = html_lang_attr.lower().strip()[:2]
         if l in ("hu", "en", "de", "fr", "es", "ru", "it", "pl", "ro", "sk", "cs"):
             return l
 
-    t = text.lower()
-    hu_diacritics = len(re.findall(r"[áéíóöőúüű]", t))
-    ru_letters = len(re.findall(r"[а-яё]", t))
+    t: str = text.lower()
+    hu_diacritics: int = len(re.findall(r"[áéíóöőúüű]", t))
+    ru_letters: int = len(re.findall(r"[а-яё]", t))
 
     # Fast-path for Russian
     if ru_letters > 10:
         return "ru"
 
     # Fast-path for Hungarian
-    hu_words = t.count(" a ") + t.count(" az ") + t.count(" és ") + t.count(" hogy ")
-    hu_score = (hu_words + hu_diacritics) * 1.5
+    hu_words: int = t.count(" a ") + t.count(" az ") + t.count(" és ") + t.count(" hogy ")
+    hu_score: float = (hu_words + hu_diacritics) * 1.5
     if hu_diacritics >= 3 or hu_score >= 8:
         return "hu"
 
-    en_score = (
+    en_score: int = (
         t.count(" the ")
         + t.count(" and ")
         + t.count(" of ")
         + t.count(" to ")
         + t.count(" is ")
     )
-    de_score = (
+    de_score: int = (
         t.count(" und ")
         + t.count(" der ")
         + t.count(" die ")
         + t.count(" das ")
         + t.count(" ist ")
     )
-    fr_score = (
+    fr_score: int = (
         t.count(" le ")
         + t.count(" la ")
         + t.count(" et ")
@@ -134,16 +137,16 @@ def detect_language(text, html_lang_attr=""):
         + t.count(" du ")
     )
 
-    scores = {
+    scores: Dict[str, float] = {
         "hu": hu_score,
-        "en": en_score,
-        "de": de_score,
-        "fr": fr_score,
-        "ru": ru_letters * 2,
+        "en": float(en_score),
+        "de": float(de_score),
+        "fr": float(fr_score),
+        "ru": float(ru_letters * 2),
     }
 
-    best = max(scores, key=scores.get)
-    sorted_scores = sorted(scores.values(), reverse=True)
+    best: str = max(scores, key=lambda k: scores[k])
+    sorted_scores: List[float] = sorted(scores.values(), reverse=True)
 
     # If top heuristic has high confidence over second place, return immediately
     if sorted_scores[0] >= 5 and (sorted_scores[0] - sorted_scores[1] >= 3):
@@ -153,7 +156,7 @@ def detect_language(text, html_lang_attr=""):
     try:
         from langdetect import detect as ld_detect
 
-        lang = ld_detect(text[:2000])
+        lang: str = ld_detect(text[:2000])
         if len(lang) == 2:
             return lang.lower()
     except Exception:
@@ -164,20 +167,20 @@ def detect_language(text, html_lang_attr=""):
     return best
 
 
-def detect_category(title, text, soup=None):
+def detect_category(title: str, text: str, soup: Optional[BeautifulSoup] = None) -> str:
     """
     Weighted category classification based on title, content, meta tags, and HTML structure.
     Avoids false positives (e.g. solitary 'post' word no longer flags forum).
     """
-    meta_text = ""
-    has_post_form = False
-    has_cart = False
+    meta_text: str = ""
+    has_post_form: bool = False
+    has_cart: bool = False
 
     if soup is not None:
         # Check meta keywords & description
         for meta in soup.find_all("meta"):
-            name = meta.get("name", "").lower()
-            prop = meta.get("property", "").lower()
+            name: str = meta.get("name", "").lower()
+            prop: str = meta.get("property", "").lower()
             if name in ("keywords", "description") or prop in (
                 "og:description",
                 "og:title",
@@ -186,15 +189,15 @@ def detect_category(title, text, soup=None):
 
         # Check structural elements
         for form in soup.find_all("form"):
-            form_text = str(form).lower()
+            form_text: str = str(form).lower()
             if "comment" in form_text or "reply" in form_text or "message" in form_text:
                 has_post_form = True
             if "cart" in form_text or "checkout" in form_text or "buy" in form_text:
                 has_cart = True
 
-    combined = (title + " " + meta_text + " " + text[:2500]).lower()
+    combined: str = (title + " " + meta_text + " " + text[:2500]).lower()
 
-    weights = {
+    weights: Dict[str, int] = {
         "forum": 0,
         "wiki": 0,
         "library": 0,
@@ -203,7 +206,7 @@ def detect_category(title, text, soup=None):
     }
 
     # Forum indicators (weighted phrases)
-    forum_strong = [
+    forum_strong: List[str] = [
         "forum",
         "board index",
         "phpbb",
@@ -212,7 +215,7 @@ def detect_category(title, text, soup=None):
         "threads",
         "bulletin board",
     ]
-    forum_medium = ["thread", "topic", "reply to thread", "posts:", "registered user"]
+    forum_medium: List[str] = ["thread", "topic", "reply to thread", "posts:", "registered user"]
     for w in forum_strong:
         if w in combined:
             weights["forum"] += 4
@@ -223,8 +226,8 @@ def detect_category(title, text, soup=None):
         weights["forum"] += 3
 
     # Wiki indicators
-    wiki_strong = ["wiki", "mediawiki", "wikitext", "special:search", "main page - wiki"]
-    wiki_medium = ["encyclopedia", "edit this page", "revision history", "article talk"]
+    wiki_strong: List[str] = ["wiki", "mediawiki", "wikitext", "special:search", "main page - wiki"]
+    wiki_medium: List[str] = ["encyclopedia", "edit this page", "revision history", "article talk"]
     for w in wiki_strong:
         if w in combined:
             weights["wiki"] += 4
@@ -233,8 +236,8 @@ def detect_category(title, text, soup=None):
             weights["wiki"] += 2
 
     # Library indicators
-    lib_strong = ["library", "genesis", "ebooks", "z-library", "books catalog"]
-    lib_medium = ["book", "author", "isbn", "publisher", "download pdf", "monograph"]
+    lib_strong: List[str] = ["library", "genesis", "ebooks", "z-library", "books catalog"]
+    lib_medium: List[str] = ["book", "author", "isbn", "publisher", "download pdf", "monograph"]
     for w in lib_strong:
         if w in combined:
             weights["library"] += 4
@@ -243,8 +246,8 @@ def detect_category(title, text, soup=None):
             weights["library"] += 2
 
     # News indicators
-    news_strong = ["press release", "journalism", "daily news", "news agency", "breaking news"]
-    news_medium = ["press", "editorial", "headline", "reporter", "correspondent"]
+    news_strong: List[str] = ["press release", "journalism", "daily news", "news agency", "breaking news"]
+    news_medium: List[str] = ["press", "editorial", "headline", "reporter", "correspondent"]
     for w in news_strong:
         if w in combined:
             weights["news"] += 4
@@ -253,8 +256,8 @@ def detect_category(title, text, soup=None):
             weights["news"] += 2
 
     # Market indicators
-    market_strong = ["marketplace", "vendor", "escrow", "shopping cart", "add to cart"]
-    market_medium = ["market", "shop", "price", "btc price", "checkout", "shipping", "catalog"]
+    market_strong: List[str] = ["marketplace", "vendor", "escrow", "shopping cart", "add to cart"]
+    market_medium: List[str] = ["market", "shop", "price", "btc price", "checkout", "shipping", "catalog"]
     for w in market_strong:
         if w in combined:
             weights["market"] += 4
@@ -265,7 +268,7 @@ def detect_category(title, text, soup=None):
         weights["market"] += 3
 
     # Identify best category
-    best_cat = max(weights, key=weights.get)
+    best_cat: str = max(weights, key=lambda k: weights[k])
     if weights[best_cat] >= 3:
         return best_cat
 
@@ -284,21 +287,21 @@ def detect_category(title, text, soup=None):
     return "other"
 
 
-def extract_fingerprint(text):
+def extract_fingerprint(text: str) -> str:
     """Generate a 16-hex fingerprint from text after removing digits to identify content clones."""
-    core = re.sub(r"\d+", "", text)
+    core: str = re.sub(r"\d+", "", text)
     return hashlib.sha256(core.encode()).hexdigest()[:16]
 
 
 class ContentDetector:
     """Class wrapper for content detection with in-memory LRU classification caching."""
 
-    def __init__(self, max_cache_size=50000):
-        self.max_cache_size = max_cache_size
-        self.fp_cache = OrderedDict()
-        self.lock = threading.Lock()
+    def __init__(self, max_cache_size: int = MAX_MEMORY_CACHE_SIZE) -> None:
+        self.max_cache_size: int = max_cache_size
+        self.fp_cache: OrderedDict[str, Tuple[str, str]] = OrderedDict()
+        self.lock: threading.Lock = threading.Lock()
 
-    def get_cached_classification(self, fp):
+    def get_cached_classification(self, fp: str) -> Optional[Tuple[str, str]]:
         """Retrieve cached (lang, category) tuple by content fingerprint."""
         if not fp:
             return None
@@ -308,7 +311,7 @@ class ContentDetector:
                 return self.fp_cache[fp]
         return None
 
-    def cache_classification(self, fp, lang, category):
+    def cache_classification(self, fp: str, lang: str, category: str) -> None:
         """Store (lang, category) in LRU fingerprint cache."""
         if not fp:
             return
@@ -317,25 +320,32 @@ class ContentDetector:
             if len(self.fp_cache) > self.max_cache_size:
                 self.fp_cache.popitem(last=False)
 
-    def classify_with_cache(self, fp, title, text, html_lang="", soup=None):
+    def classify_with_cache(
+        self,
+        fp: str,
+        title: str,
+        text: str,
+        html_lang: str = "",
+        soup: Optional[BeautifulSoup] = None,
+    ) -> Tuple[str, str]:
         """Classify content, using fingerprint cache to bypass repeat computation."""
         cached = self.get_cached_classification(fp)
         if cached:
             return cached[0], cached[1]
 
-        lang = self.detect_language(text, html_lang)
-        category = self.detect_category(title, text, soup=soup)
+        lang: str = self.detect_language(text, html_lang)
+        category: str = self.detect_category(title, text, soup=soup)
         self.cache_classification(fp, lang, category)
         return lang, category
 
-    def detect_language(self, text, html_lang_attr=""):
+    def detect_language(self, text: str, html_lang_attr: str = "") -> str:
         return detect_language(text, html_lang_attr)
 
-    def detect_category(self, title, text, soup=None):
+    def detect_category(self, title: str, text: str, soup: Optional[BeautifulSoup] = None) -> str:
         return detect_category(title, text, soup=soup)
 
-    def extract_fingerprint(self, text):
+    def extract_fingerprint(self, text: str) -> str:
         return extract_fingerprint(text)
 
-    def extract_bitcoin_addresses(self, text, validate_checksum=True):
+    def extract_bitcoin_addresses(self, text: str, validate_checksum: bool = True) -> List[str]:
         return extract_bitcoin_addresses(text, validate_checksum=validate_checksum)

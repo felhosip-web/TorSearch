@@ -1,12 +1,14 @@
 """
 Main application window coordinating UI components, search lifecycle, persistence, and UX features.
-Includes: Dark mode theme, result preview inspector, live filtering, queue resume, and advanced export.
+Integrates standard logging, ConfigManager persistence, and constants configuration.
 """
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import json
+import logging
 import os
+from pathlib import Path
 import random
 import re
 import sqlite3
@@ -15,17 +17,26 @@ import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from onion_search.config import (
+    AppConfig,
+    ConfigManager,
+    DB_FILE,
+    MAX_MEMORY_CACHE_SIZE,
+    MIN_NEWNYM_INTERVAL_AUTO,
+    MIN_NEWNYM_INTERVAL_TRIGGER,
+    STATE_DIR,
+    TIMEOUT_GET,
+)
 from onion_search.core.detector import ContentDetector
 from onion_search.core.fetcher import OnionFetcher
 from onion_search.core.neonym import TorController
 from onion_search.storage.json_backend import JSONBackend
 from onion_search.storage.sqlite_backend import SQLiteBackend
 from onion_search.ui.filters import FilterPanel
-from onion_search.ui.log_panel import LogPanel
-from onion_search.utils.helpers import DB_FILE, STATE_DIR, fmt_ts
-
-MAX_MEMORY_CACHE = 50000
+from onion_search.ui.log_panel import LogPanel, logger
+from onion_search.utils.helpers import fmt_ts
 
 
 class MainWindow:
@@ -33,60 +44,65 @@ class MainWindow:
 
     def __init__(
         self,
-        root,
-        fetcher=None,
-        detector=None,
-        tor_controller=None,
-        sqlite_backend=None,
-        json_backend=None,
-    ):
-        self.root = root
+        root: tk.Tk,
+        fetcher: Optional[OnionFetcher] = None,
+        detector: Optional[ContentDetector] = None,
+        tor_controller: Optional[TorController] = None,
+        sqlite_backend: Optional[SQLiteBackend] = None,
+        json_backend: Optional[JSONBackend] = None,
+        config_manager: Optional[ConfigManager] = None,
+    ) -> None:
+        self.root: tk.Tk = root
         self.root.title("Onion Kereso v4.8 - secure & stable")
         self.root.geometry("1400x940")
 
+        # Configuration manager
+        self.config_manager: ConfigManager = config_manager or ConfigManager()
+        cfg: AppConfig = self.config_manager.config
+
         # Injected dependencies with default fallback
-        self.detector = detector or ContentDetector()
-        self.sqlite_backend = sqlite_backend or SQLiteBackend()
-        self.json_backend = json_backend or JSONBackend()
-        self.fetcher = fetcher or OnionFetcher(detector=self.detector)
-        self.tor_controller = tor_controller or TorController(
+        self.detector: ContentDetector = detector or ContentDetector()
+        self.sqlite_backend: SQLiteBackend = sqlite_backend or SQLiteBackend()
+        self.json_backend: JSONBackend = json_backend or JSONBackend()
+        self.fetcher: OnionFetcher = fetcher or OnionFetcher(detector=self.detector)
+        self.tor_controller: TorController = tor_controller or TorController(
             on_sessions_reset=self.fetcher.session_manager.close_all
         )
 
         # In-memory application state
-        self.seen_fp = OrderedDict()
-        self.seen_btc = OrderedDict()
-        self.checked_urls = set()
-        self.in_progress_urls = set()
-        self.pending_queue = []  # Remaining unvisited URLs for clean resume
-        self.dead_blacklist = {}
-        self.results = []
-        self.running = False
-        self.lock = threading.Lock()
-        self.stats = {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0}
+        self.seen_fp: OrderedDict[str, str] = OrderedDict()
+        self.seen_btc: OrderedDict[str, str] = OrderedDict()
+        self.checked_urls: Set[str] = set()
+        self.in_progress_urls: Set[str] = set()
+        self.pending_queue: List[str] = []  # Remaining unvisited URLs for clean resume
+        self.dead_blacklist: Dict[str, float] = {}
+        self.results: List[Dict[str, Any]] = []
+        self.running: bool = False
+        self.lock: threading.Lock = threading.Lock()
+        self.stats: Dict[str, int] = {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0}
 
-        self.success_count = 0
-        self.total_count = 0
-        self.last_newnym = 0
-        self.start_time = 0
-        self.next_newnym_success = random.randint(40, 60)
-        self.next_newnym_total = 100
-        self.total_newnym = 0
+        self.success_count: int = 0
+        self.total_count: int = 0
+        self.last_newnym: float = 0
+        self.start_time: float = 0
+        self.next_newnym_success: int = random.randint(40, 60)
+        self.next_newnym_total: int = 100
+        self.total_newnym: int = 0
 
-        self.pending_results = []
-        self.pending_fp = {}
-        self.pending_btc = {}
-        self.pending_checked = []
-        self.pending_dead = {}
+        self.pending_results: List[Dict[str, Any]] = []
+        self.pending_fp: Dict[str, str] = {}
+        self.pending_btc: Dict[str, str] = {}
+        self.pending_checked: List[str] = []
+        self.pending_dead: Dict[str, float] = {}
 
-        # Tkinter variables
-        self.dark_mode_var = tk.BooleanVar(value=True)  # Dark mode default
-        self.backend_var = tk.StringVar(value="sqlite")
-        self.auto_newnym_success_var = tk.BooleanVar(value=True)
-        self.auto_newnym_total_var = tk.BooleanVar(value=True)
-        self.success_threshold_var = tk.IntVar(value=50)
-        self.total_threshold_var = tk.IntVar(value=100)
-        self.auto_save_var = tk.BooleanVar(value=True)
+        # Tkinter variables loaded from AppConfig
+        self.dark_mode_var = tk.BooleanVar(value=cfg.dark_mode)
+        self.backend_var = tk.StringVar(value=cfg.backend)
+        self.auto_newnym_success_var = tk.BooleanVar(value=cfg.auto_newnym_success)
+        self.auto_newnym_total_var = tk.BooleanVar(value=cfg.auto_newnym_total)
+        self.success_threshold_var = tk.IntVar(value=cfg.success_threshold)
+        self.total_threshold_var = tk.IntVar(value=cfg.total_threshold)
+        self.auto_save_var = tk.BooleanVar(value=cfg.auto_save)
         self.status_var = tk.StringVar(value="Készen - v4.8 secure")
 
         # Build UI layout
@@ -105,24 +121,24 @@ class MainWindow:
 
         threading.Thread(target=self.check_tor_on_startup, daemon=True).start()
 
-    def get_backend(self):
+    def get_backend(self) -> Any:
         return (
             self.sqlite_backend
             if self.backend_var.get() == "sqlite"
             else self.json_backend
         )
 
-    def _cache_fp(self, fp, url):
+    def _cache_fp(self, fp: str, url: str) -> None:
         self.seen_fp[fp] = url
-        if len(self.seen_fp) > MAX_MEMORY_CACHE:
+        if len(self.seen_fp) > MAX_MEMORY_CACHE_SIZE:
             self.seen_fp.popitem(last=False)
 
-    def _cache_btc(self, btc, url):
+    def _cache_btc(self, btc: str, url: str) -> None:
         self.seen_btc[btc] = url
-        if len(self.seen_btc) > MAX_MEMORY_CACHE:
+        if len(self.seen_btc) > MAX_MEMORY_CACHE_SIZE:
             self.seen_btc.popitem(last=False)
 
-    def is_fp_seen(self, fp):
+    def is_fp_seen(self, fp: str) -> Tuple[bool, Optional[str]]:
         with self.lock:
             if fp in self.seen_fp:
                 return True, self.seen_fp[fp]
@@ -135,7 +151,7 @@ class MainWindow:
                 return True, db_url
         return False, None
 
-    def is_btc_seen(self, btc):
+    def is_btc_seen(self, btc: str) -> Tuple[bool, Optional[str]]:
         with self.lock:
             if btc in self.seen_btc:
                 return True, self.seen_btc[btc]
@@ -148,7 +164,7 @@ class MainWindow:
                 return True, db_url
         return False, None
 
-    def apply_theme(self):
+    def apply_theme(self) -> None:
         """Configure and toggle modern dark/light themes via ttk.Style."""
         dark = self.dark_mode_var.get()
         style = ttk.Style()
@@ -307,33 +323,57 @@ class MainWindow:
 
             self.btn_theme.config(text="🌙 Sötét mód")
 
-    def toggle_theme(self):
+    def toggle_theme(self) -> None:
         self.dark_mode_var.set(not self.dark_mode_var.get())
         self.apply_theme()
+        self.save_current_config()
 
-    def setup_ui(self):
+    def save_current_config(self) -> None:
+        """Persist current UI options to ~/.config/onion_search/config.json."""
+        try:
+            cfg = AppConfig(
+                socks_port=self.port_var.get(),
+                ctrl_port=self.ctrl_port_var.get(),
+                workers=self.worker_var.get(),
+                backend=self.backend_var.get(),
+                dark_mode=self.dark_mode_var.get(),
+                auto_newnym_success=self.auto_newnym_success_var.get(),
+                auto_newnym_total=self.auto_newnym_total_var.get(),
+                success_threshold=self.success_threshold_var.get(),
+                total_threshold=self.total_threshold_var.get(),
+                auto_save=self.auto_save_var.get(),
+                live_filtering=self.filters_panel.live_filter_var.get(),
+                queries=self.query_entry.get(),
+            )
+            self.config_manager.save(cfg)
+        except Exception:
+            pass
+
+    def setup_ui(self) -> None:
+        cfg = self.config_manager.config
+
         # 1. Top toolbar
         top = ttk.Frame(self.root, padding=8)
         top.pack(fill=tk.X)
         ttk.Label(top, text="Ahmia szavak:").pack(side=tk.LEFT)
         self.query_entry = ttk.Entry(top, width=20)
-        self.query_entry.insert(0, "forum, board, wiki, library")
+        self.query_entry.insert(0, cfg.queries)
         self.query_entry.pack(side=tk.LEFT, padx=4)
 
         ttk.Label(top, text="Tor:").pack(side=tk.LEFT, padx=(5, 0))
-        self.port_var = tk.StringVar(value="9050")
+        self.port_var = tk.StringVar(value=cfg.socks_port)
         ttk.Combobox(
             top, textvariable=self.port_var, values=["9050", "9150"], width=5
         ).pack(side=tk.LEFT)
 
         ttk.Label(top, text="Ctrl:").pack(side=tk.LEFT, padx=(5, 0))
-        self.ctrl_port_var = tk.StringVar(value="9051")
+        self.ctrl_port_var = tk.StringVar(value=cfg.ctrl_port)
         ttk.Combobox(
             top, textvariable=self.ctrl_port_var, values=["9051", "9151"], width=5
         ).pack(side=tk.LEFT)
 
         ttk.Label(top, text="Workers:").pack(side=tk.LEFT, padx=(5, 0))
-        self.worker_var = tk.IntVar(value=6)
+        self.worker_var = tk.IntVar(value=cfg.workers)
         ttk.Spinbox(
             top, from_=2, to=10, textvariable=self.worker_var, width=4
         ).pack(side=tk.LEFT)
@@ -443,6 +483,7 @@ class MainWindow:
         self.filters_panel = FilterPanel(
             self.root, on_filter_changed=self.apply_filters
         )
+        self.filters_panel.live_filter_var.set(cfg.live_filtering)
         self.filters_panel.pack(fill=tk.X)
 
         # 4. Main body
@@ -775,16 +816,18 @@ class MainWindow:
         )
         self.prev_text.pack(fill=tk.X, pady=2)
 
-    def log_msg(self, msg, force=False, tag=None):
-        self.log_panel.log_msg(msg, force=force, tag=tag)
+    def log_msg(self, msg: str, force: bool = False, tag: Optional[str] = None) -> None:
+        """Route log message via standard Python logger."""
+        extra = {"tag": tag} if tag else {}
+        logger.info(msg, extra=extra)
 
-    def set_led(self, canvas, led_id, color):
+    def set_led(self, canvas: tk.Canvas, led_id: int, color: str) -> None:
         def _do():
             canvas.itemconfig(led_id, fill=color)
 
         self.root.after(0, _do)
 
-    def set_statusbar_color(self, bg, fg="white", msg=None):
+    def set_statusbar_color(self, bg: str, fg: str = "white", msg: Optional[str] = None) -> None:
         def _do():
             self.status_bar.config(bg=bg)
             self.lbl_statusbar.config(bg=bg, fg=fg)
@@ -793,18 +836,18 @@ class MainWindow:
 
         self.root.after(0, _do)
 
-    def apply_filters(self):
+    def apply_filters(self) -> None:
         """Refresh TreeView based on current quick and precise filters."""
         self.tree.delete(*self.tree.get_children())
-        shown = 0
-        filtered_out = 0
+        shown: int = 0
+        filtered_out: int = 0
         for r in self.results:
             visible, _ = self.filters_panel.is_item_visible(r)
             if not visible:
                 filtered_out += 1
                 continue
-            ts_str = fmt_ts(r.get("ts"))
-            tags = []
+            ts_str: str = fmt_ts(r.get("ts"))
+            tags: List[str] = []
             l = r.get("lang", "en")
             if l in ("hu", "en", "de", "ru", "fr"):
                 tags.append(f"lang_{l}")
@@ -834,7 +877,7 @@ class MainWindow:
             tag="filter",
         )
 
-    def reset_counters(self):
+    def reset_counters(self) -> None:
         with self.lock:
             self.success_count = 0
             self.total_count = 0
@@ -846,7 +889,7 @@ class MainWindow:
         self.update_counts_label()
         self.log_msg("[COUNTER] Számlálók reset", force=True, tag="save")
 
-    def update_counts_label(self):
+    def update_counts_label(self) -> None:
         self.root.after(
             0,
             lambda: self.lbl_counts.config(
@@ -857,11 +900,11 @@ class MainWindow:
             ),
         )
 
-    def auto_detect_tor(self):
+    def auto_detect_tor(self) -> None:
         self.log_msg("[TOR AUTO-DETECT] Keresés 9050/9150...", force=True, tag="start")
         self.set_statusbar_color("#f39c12", msg="Tor auto-detect 9050/9150...")
 
-        def _run():
+        def _run() -> None:
             socks_port, ok, msg = self.tor_controller.detect_working_tor(
                 preferred_port=self.port_var.get()
             )
@@ -889,7 +932,7 @@ class MainWindow:
                 ),
             )
 
-            def _update():
+            def _update() -> None:
                 if ok:
                     self.set_led(self.canvas_socks, self.led_socks, "#2ecc71")
                 else:
@@ -926,89 +969,93 @@ class MainWindow:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def check_tor_on_startup(self):
-        time.sleep(0.8)
-        socks_port, ok, msg = self.tor_controller.detect_working_tor(
-            preferred_port=self.port_var.get()
-        )
-        if ok:
-            self.root.after(0, lambda: self.port_var.set(socks_port))
-            ctrl_map = {"9150": "9151", "9050": "9051"}
-            ctrl_port = ctrl_map.get(socks_port, self.ctrl_port_var.get())
-            self.root.after(0, lambda: self.ctrl_port_var.set(ctrl_port))
-        else:
-            socks_port = self.port_var.get()
-            ctrl_port = self.ctrl_port_var.get()
-
-        socks_ok, socks_msg = self.tor_controller.check_socks(socks_port)
-        if not socks_ok:
-            alt = "9150" if socks_port == "9050" else "9050"
-            alt_ok, alt_msg = self.tor_controller.check_socks(alt)
-            if alt_ok:
-                socks_port = alt
-                socks_ok = True
-                socks_msg = alt_msg
+    def check_tor_on_startup(self) -> None:
+        try:
+            time.sleep(0.8)
+            socks_port, ok, msg = self.tor_controller.detect_working_tor(
+                preferred_port=self.port_var.get()
+            )
+            if ok:
                 self.root.after(0, lambda: self.port_var.set(socks_port))
-
-        ctrl_ok, ctrl_msg = self.tor_controller.check_control(ctrl_port)
-        if not ctrl_ok:
-            alt_ctrl = "9151" if str(ctrl_port) == "9051" else "9051"
-            alt_ok, alt_msg = self.tor_controller.check_control(alt_ctrl)
-            if alt_ok:
-                ctrl_port = alt_ctrl
-                ctrl_ok = True
-                ctrl_msg = alt_msg
+                ctrl_map = {"9150": "9151", "9050": "9051"}
+                ctrl_port = ctrl_map.get(socks_port, self.ctrl_port_var.get())
                 self.root.after(0, lambda: self.ctrl_port_var.set(ctrl_port))
-
-        self.log_msg(
-            f"[TOR CHECK] SOCKS {socks_port}: {socks_msg}",
-            force=True,
-            tag="tor_ok" if socks_ok else "tor_err",
-        )
-        self.log_msg(
-            f"[TOR CHECK] CTRL {ctrl_port}: {ctrl_msg}",
-            force=True,
-            tag="tor_ok" if ctrl_ok else "tor_err",
-        )
-
-        def _update():
-            if socks_ok:
-                self.set_led(self.canvas_socks, self.led_socks, "#2ecc71")
             else:
-                self.set_led(self.canvas_socks, self.led_socks, "#e74c3c")
-            if ctrl_ok:
-                self.set_led(self.canvas_ctrl, self.led_ctrl, "#2ecc71")
-            else:
-                self.set_led(self.canvas_ctrl, self.led_ctrl, "#e74c3c")
-            if socks_ok and ctrl_ok:
-                self.lbl_tor_status.config(
-                    text=f"Tor OK: SOCKS {socks_port} + Ctrl {ctrl_port}",
-                    foreground="#27ae60",
-                )
-                self.set_statusbar_color("#27ae60", msg=f"Tor OK - {socks_msg}")
-            elif socks_ok:
-                self.lbl_tor_status.config(
-                    text="Tor SOCKS OK, Ctrl hiba", foreground="#e67e22"
-                )
-                self.set_statusbar_color(
-                    "#e67e22", msg=f"Tor SOCKS OK ({socks_port}), de {ctrl_msg}"
-                )
-            else:
-                self.lbl_tor_status.config(
-                    text="Tor NEM elérhető - Tor Browser fut?", foreground="#c0392b"
-                )
-                self.set_statusbar_color("#c0392b", msg=f"Tor hiba: {socks_msg}")
+                socks_port = self.port_var.get()
+                ctrl_port = self.ctrl_port_var.get()
 
-        self.root.after(0, _update)
+            socks_ok, socks_msg = self.tor_controller.check_socks(socks_port)
+            if not socks_ok:
+                alt = "9150" if socks_port == "9050" else "9050"
+                alt_ok, alt_msg = self.tor_controller.check_socks(alt)
+                if alt_ok:
+                    socks_port = alt
+                    socks_ok = True
+                    socks_msg = alt_msg
+                    self.root.after(0, lambda: self.port_var.set(socks_port))
 
-    def on_backend_switch(self):
-        backend = self.backend_var.get()
+            ctrl_ok, ctrl_msg = self.tor_controller.check_control(ctrl_port)
+            if not ctrl_ok:
+                alt_ctrl = "9151" if str(ctrl_port) == "9051" else "9051"
+                alt_ok, alt_msg = self.tor_controller.check_control(alt_ctrl)
+                if alt_ok:
+                    ctrl_port = alt_ctrl
+                    ctrl_ok = True
+                    ctrl_msg = alt_msg
+                    self.root.after(0, lambda: self.ctrl_port_var.set(ctrl_port))
+
+            self.log_msg(
+                f"[TOR CHECK] SOCKS {socks_port}: {socks_msg}",
+                force=True,
+                tag="tor_ok" if socks_ok else "tor_err",
+            )
+            self.log_msg(
+                f"[TOR CHECK] CTRL {ctrl_port}: {ctrl_msg}",
+                force=True,
+                tag="tor_ok" if ctrl_ok else "tor_err",
+            )
+
+            def _update() -> None:
+                if socks_ok:
+                    self.set_led(self.canvas_socks, self.led_socks, "#2ecc71")
+                else:
+                    self.set_led(self.canvas_socks, self.led_socks, "#e74c3c")
+                if ctrl_ok:
+                    self.set_led(self.canvas_ctrl, self.led_ctrl, "#2ecc71")
+                else:
+                    self.set_led(self.canvas_ctrl, self.led_ctrl, "#e74c3c")
+                if socks_ok and ctrl_ok:
+                    self.lbl_tor_status.config(
+                        text=f"Tor OK: SOCKS {socks_port} + Ctrl {ctrl_port}",
+                        foreground="#27ae60",
+                    )
+                    self.set_statusbar_color("#27ae60", msg=f"Tor OK - {socks_msg}")
+                elif socks_ok:
+                    self.lbl_tor_status.config(
+                        text="Tor SOCKS OK, Ctrl hiba", foreground="#e67e22"
+                    )
+                    self.set_statusbar_color(
+                        "#e67e22", msg=f"Tor SOCKS OK ({socks_port}), de {ctrl_msg}"
+                    )
+                else:
+                    self.lbl_tor_status.config(
+                        text="Tor NEM elérhető - Tor Browser fut?", foreground="#c0392b"
+                    )
+                    self.set_statusbar_color("#c0392b", msg=f"Tor hiba: {socks_msg}")
+
+            self.root.after(0, _update)
+        except Exception:
+            return
+
+    def on_backend_switch(self) -> None:
+        backend: str = self.backend_var.get()
         self.lbl_backend.config(text=f"Backend: {backend}")
         self.log_msg(f"[BACKEND] Váltás: {backend}", force=True, tag="save")
         self.load_state(silent=False)
         self.load_deadlist()
+        self.save_current_config()
 
-    def update_inline_preview(self):
+    def update_inline_preview(self) -> None:
         """Update the bottom preview inspector pane with selected item details."""
         sel = self.tree.selection()
         if not sel:
@@ -1016,9 +1063,8 @@ class MainWindow:
         item_vals = self.tree.item(sel[0])["values"]
         if not item_vals or len(item_vals) < 2:
             return
-        url = item_vals[1]
+        url: str = item_vals[1]
 
-        # Find full result object
         res = next((r for r in self.results if r.get("url") == url), None)
         if not res:
             res = {
@@ -1041,7 +1087,7 @@ class MainWindow:
             f"Snippet: {res.get('snippet', '')}\n\nUjjlenyomat (Fingerprint): {res.get('fp', 'N/A')}",
         )
 
-    def open_selected_preview(self):
+    def open_selected_preview(self) -> None:
         """Open detailed modal preview dialog for selected result."""
         sel = self.tree.selection()
         if not sel:
@@ -1075,17 +1121,16 @@ class MainWindow:
         ttk.Button(btn_row, text="📋 URL másolása", command=self.copy_selected_url).pack(side=tk.LEFT, padx=3)
         ttk.Button(btn_row, text="Bezárás", command=win.destroy).pack(side=tk.RIGHT, padx=3)
 
-    def open_in_tor_browser(self):
+    def open_in_tor_browser(self) -> None:
         """Attempt to launch Tor Browser or copy socks-ready command to clipboard."""
         sel = self.tree.selection()
         if not sel:
             return
-        url = self.tree.item(sel[0])["values"][1]
+        url: str = self.tree.item(sel[0])["values"][1]
         self.copy_to_clipboard(url)
 
-        # Look for Tor browser binary
-        candidates = ["torbrowser-launcher", "tor-browser", "firefox"]
-        launched = False
+        candidates: List[str] = ["torbrowser-launcher", "tor-browser", "firefox"]
+        launched: bool = False
         for c in candidates:
             try:
                 subprocess.Popen([c, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1103,7 +1148,7 @@ class MainWindow:
                 f"Az URL másolva a vágólapra:\n{url}\n\nNyisd meg a Tor Browserben a megtekintéshez!",
             )
 
-    def open_sql_query(self):
+    def open_sql_query(self) -> None:
         if self.backend_var.get() != "sqlite":
             messagebox.showinfo("SQL", "Válts SQLite backend-re!")
             return
@@ -1134,7 +1179,7 @@ class MainWindow:
         txt = scrolledtext.ScrolledText(win, height=20, font=("Consolas", 8))
         txt.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        def is_safe_select(q):
+        def is_safe_select(q: str) -> Tuple[bool, str]:
             q_stripped = q.strip().lower()
             if not q_stripped:
                 return False, "Üres lekérdezés"
@@ -1163,7 +1208,7 @@ class MainWindow:
                     return False, "Több utasítás (;) nem engedélyezett"
             return True, "OK"
 
-        def run_q():
+        def run_q() -> None:
             q = query_entry.get()
             safe, reason = is_safe_select(q)
             if not safe:
@@ -1197,12 +1242,12 @@ class MainWindow:
         ttk.Button(win, text="Futtatás (biztonságos)", command=run_q).pack(pady=5)
         run_q()
 
-    def do_newnym(self, reason="manual"):
-        ctrl_port = int(self.ctrl_port_var.get() or 9051)
+    def do_newnym(self, reason: str = "manual") -> bool:
+        ctrl_port: int = int(self.ctrl_port_var.get() or 9051)
         now = time.time()
-        if reason.startswith("auto") and now - self.last_newnym < 12:
+        if reason.startswith("auto") and now - self.last_newnym < MIN_NEWNYM_INTERVAL_AUTO:
             self.log_msg(
-                f"[NEWNYM] Auto skip - {now-self.last_newnym:.1f}s < 12s",
+                f"[NEWNYM] Auto skip - {now-self.last_newnym:.1f}s < {MIN_NEWNYM_INTERVAL_AUTO}s",
                 tag="newnym",
             )
             return False
@@ -1242,12 +1287,12 @@ class MainWindow:
             self.set_statusbar_color("#c0392b", msg=f"NEWNYM HIBA: {msg}")
             return False
 
-    def manual_newnym_thread(self):
+    def manual_newnym_thread(self) -> None:
         threading.Thread(
             target=lambda: self.do_newnym(reason="manual"), daemon=True
         ).start()
 
-    def check_auto_newnym(self, is_success=False):
+    def check_auto_newnym(self, is_success: bool = False) -> None:
         with self.lock:
             self.total_count += 1
             if is_success:
@@ -1273,7 +1318,7 @@ class MainWindow:
             should_trigger = True
             reason = f"auto osszes {tc}/{n_t}"
         if should_trigger:
-            if now - self.last_newnym >= 15:
+            if now - self.last_newnym >= MIN_NEWNYM_INTERVAL_TRIGGER:
                 self.log_msg(
                     f"[NEWNYM] Auto trigger: {reason}", force=True, tag="newnym"
                 )
@@ -1282,17 +1327,17 @@ class MainWindow:
                 ).start()
             else:
                 self.log_msg(
-                    f"[NEWNYM] Auto var - {now-self.last_newnym:.1f}s < 15s",
+                    f"[NEWNYM] Auto var - {now-self.last_newnym:.1f}s < {MIN_NEWNYM_INTERVAL_TRIGGER}s",
                     tag="newnym",
                 )
 
-    def load_deadlist(self):
+    def load_deadlist(self) -> None:
         self.dead_blacklist = self.get_backend().load_dead()
 
-    def save_deadlist(self):
+    def save_deadlist(self) -> None:
         self.get_backend().save_dead(self.dead_blacklist)
 
-    def save_incremental_pending(self):
+    def save_incremental_pending(self) -> None:
         """Save only newly discovered pending delta items without rewriting the entire database."""
         with self.lock:
             if not self.pending_results and not self.pending_checked and not self.pending_dead:
@@ -1319,38 +1364,9 @@ class MainWindow:
         except Exception as e:
             self.log_msg(f"[SAVE INCREMENTAL HIBA] {e}", force=False, tag="error")
 
-    def save_state(self, silent=False):
+    def save_state(self, silent: bool = False) -> None:
         try:
             backend = self.get_backend()
-            if (
-                silent
-                and self.backend_var.get() == "sqlite"
-                and (self.pending_results or self.pending_checked)
-            ):
-                pending = {
-                    "results": self.pending_results,
-                    "seen_fp": self.pending_fp,
-                    "seen_btc": self.pending_btc,
-                    "checked_urls": self.pending_checked,
-                    "stats": self.stats,
-                }
-                backend.save_pending(pending)
-                if pending.get("results"):
-                    self.log_msg(
-                        f"[SAVE sqlite incremental] {len(pending['results'])} uj találat",
-                        force=False,
-                        tag="save",
-                    )
-                if self.pending_dead:
-                    backend.save_dead_pending(self.pending_dead)
-                with self.lock:
-                    self.pending_results = []
-                    self.pending_fp = {}
-                    self.pending_btc = {}
-                    self.pending_checked = []
-                    self.pending_dead = {}
-                return
-
             with self.lock:
                 data = {
                     "seen_fp": dict(self.seen_fp),
@@ -1368,11 +1384,11 @@ class MainWindow:
                 }
             backend.save(data)
             with self.lock:
-                self.pending_results = []
-                self.pending_fp = {}
-                self.pending_btc = {}
-                self.pending_checked = []
-                self.pending_dead = {}
+                self.pending_results.clear()
+                self.pending_fp.clear()
+                self.pending_btc.clear()
+                self.pending_checked.clear()
+                self.pending_dead.clear()
             if not silent:
                 self.log_msg(
                     f"[SAVE {self.backend_var.get()} full] {len(self.results)} találat",
@@ -1385,7 +1401,7 @@ class MainWindow:
             else:
                 self.log_msg(f"[SAVE HIBA] {e}", force=True, tag="error")
 
-    def load_state(self, silent=False):
+    def load_state(self, silent: bool = False) -> None:
         try:
             data = self.get_backend().load()
             if not data:
@@ -1470,11 +1486,11 @@ class MainWindow:
                 msg=f"Betöltve [{self.backend_var.get()}]: {len(self.results)} egyedi",
             )
             with self.lock:
-                self.pending_results = []
-                self.pending_fp = {}
-                self.pending_btc = {}
-                self.pending_checked = []
-                self.pending_dead = {}
+                self.pending_results.clear()
+                self.pending_fp.clear()
+                self.pending_btc.clear()
+                self.pending_checked.clear()
+                self.pending_dead.clear()
         except Exception as e:
             self.log_msg(
                 f"[LOAD HIBA {self.backend_var.get()}] {e}",
@@ -1484,7 +1500,7 @@ class MainWindow:
             if not silent:
                 messagebox.showerror("Betöltés hiba", str(e))
 
-    def clear_state(self):
+    def clear_state(self) -> None:
         if messagebox.askyesno(
             "Törlés", f"Minden mentés törlése? Backend: {self.backend_var.get()}"
         ):
@@ -1497,11 +1513,11 @@ class MainWindow:
                 self.pending_queue.clear()
                 self.results.clear()
                 self.dead_blacklist.clear()
-                self.pending_results = []
-                self.pending_fp = {}
-                self.pending_btc = {}
-                self.pending_checked = []
-                self.pending_dead = {}
+                self.pending_results.clear()
+                self.pending_fp.clear()
+                self.pending_btc.clear()
+                self.pending_checked.clear()
+                self.pending_dead.clear()
                 self.success_count = 0
                 self.total_count = 0
                 self.stats = {
@@ -1532,12 +1548,13 @@ class MainWindow:
             self.update_counts_label()
             self.set_statusbar_color("#2c3e50", msg="Törölve - készen")
 
-    def on_close(self):
+    def on_close(self) -> None:
         if self.auto_save_var.get():
             self.save_state(silent=False)
+        self.save_current_config()
         self.root.destroy()
 
-    def show_context_menu(self, event):
+    def show_context_menu(self, event: tk.Event) -> None:
         item = self.tree.identify_row(event.y)
         if item:
             self.tree.selection_set(item)
@@ -1547,29 +1564,29 @@ class MainWindow:
         finally:
             self.context_menu.grab_release()
 
-    def copy_to_clipboard(self, text):
+    def copy_to_clipboard(self, text: str) -> None:
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.root.update()
 
-    def copy_selected_url(self):
+    def copy_selected_url(self) -> None:
         sel = self.tree.selection()
         if not sel:
             return
         self.copy_to_clipboard(self.tree.item(sel[0])["values"][1])
         self.set_statusbar_color("#27ae60", msg="Vágólapra másolva!")
 
-    def copy_all_urls(self):
-        urls = [self.tree.item(c)["values"][1] for c in self.tree.get_children()]
+    def copy_all_urls(self) -> None:
+        urls: List[str] = [self.tree.item(c)["values"][1] for c in self.tree.get_children()]
         if urls:
             self.copy_to_clipboard("\n".join(urls))
             self.set_statusbar_color("#27ae60", msg=f"{len(urls)} URL vágólapra!")
 
-    def delete_selected(self):
+    def delete_selected(self) -> None:
         sel = self.tree.selection()
         if not sel:
             return
-        url = self.tree.item(sel[0])["values"][1]
+        url: str = self.tree.item(sel[0])["values"][1]
         with self.lock:
             self.results = [r for r in self.results if r["url"] != url]
         self.tree.delete(sel[0])
@@ -1584,7 +1601,7 @@ class MainWindow:
                 pass
         self.log_msg(f"[DELETE] {url[:60]}", force=True, tag="dead")
 
-    def open_export_dialog(self):
+    def open_export_dialog(self) -> None:
         """Open advanced export options dialog (scope, category filter, format)."""
         if not self.results:
             messagebox.showinfo("Export", "Nincs mit exportálni!")
@@ -1630,7 +1647,7 @@ class MainWindow:
         ttk.Radiobutton(fmt_frame, text="JSON (fejlesztőknek)", variable=fmt_var, value="json").pack(side=tk.LEFT, padx=6)
         ttk.Radiobutton(fmt_frame, text="TXT (egyszerű lista)", variable=fmt_var, value="txt").pack(side=tk.LEFT, padx=6)
 
-        def _do_export():
+        def _do_export() -> None:
             scope = scope_var.get()
             selected_cat = cat_combo.get()
             selected_lang = lang_combo.get()
@@ -1642,7 +1659,6 @@ class MainWindow:
             else:
                 candidates = list(self.results)
 
-            # Apply category and lang if set
             export_list = []
             for r in candidates:
                 if selected_cat != "all" and r.get("category", "other") != selected_cat:
@@ -1691,8 +1707,8 @@ class MainWindow:
         ttk.Button(btn_row, text="💾 Exportálás", command=_do_export).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=2)
 
-    def fetch_github_thread(self):
-        def _run():
+    def fetch_github_thread(self) -> None:
+        def _run() -> None:
             found = self.fetcher.fetch_github_seeds()
             self.root.after(
                 0,
@@ -1704,7 +1720,7 @@ class MainWindow:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def fetch_one(self, url, proxy_url):
+    def fetch_one(self, url: str, proxy_url: str) -> Dict[str, Any]:
         now_ts = time.time()
         with self.lock:
             if url in self.dead_blacklist:
@@ -1717,13 +1733,11 @@ class MainWindow:
                 }
             self.in_progress_urls.add(url)
 
-        # Fetch page with retry and rate-limiting
         page = self.fetcher.fetch_page(
             url, proxy_url, is_running_cb=lambda: self.running
         )
-        url_to_save = page.get("url", url)
+        url_to_save: str = page.get("url", url)
 
-        # If interrupted during fetch, abort and leave out of checked_urls so it can resume!
         if page.get("status") == "canceled" or not self.running:
             with self.lock:
                 self.in_progress_urls.discard(url)
@@ -1749,14 +1763,13 @@ class MainWindow:
                         self.pending_checked.append(url)
             return page
 
-        # Content filtering check
-        fp = page.get("fp", "")
-        btc = page.get("btc", [])
-        lang = page.get("lang", "en")
-        category = page.get("category", "other")
-        title = page.get("title", "")
-        text = page.get("text", "")
-        snippet = page.get("snippet", "")
+        fp: str = page.get("fp", "")
+        btc: List[str] = page.get("btc", [])
+        lang: str = page.get("lang", "en")
+        category: str = page.get("category", "other")
+        title: str = page.get("title", "")
+        text: str = page.get("text", "")
+        snippet: str = page.get("snippet", "")
 
         if (
             self.filters_panel.enable_precise_var.get()
@@ -1782,7 +1795,6 @@ class MainWindow:
                     "category": category,
                 }
 
-        # Check for fingerprint clone
         is_fp_duplicate, fp_orig = self.is_fp_seen(fp)
         if is_fp_duplicate:
             with self.lock:
@@ -1800,7 +1812,6 @@ class MainWindow:
                 "category": category,
             }
 
-        # Check for Bitcoin address clone
         for b in btc:
             is_btc_duplicate, _ = self.is_btc_seen(b)
             if is_btc_duplicate:
@@ -1818,7 +1829,6 @@ class MainWindow:
                     "category": category,
                 }
 
-        # Record unique site
         with self.lock:
             self.in_progress_urls.discard(url)
             self._cache_fp(fp, url_to_save)
@@ -1854,7 +1864,7 @@ class MainWindow:
             "category": category,
         }
 
-    def start_thread(self):
+    def start_thread(self) -> None:
         """Start fresh search from Ahmia queries + extra onions."""
         if self.running:
             return
@@ -1862,7 +1872,7 @@ class MainWindow:
         self.set_statusbar_color("#2980b9", msg="Keresés indítása...")
         threading.Thread(target=lambda: self.run_search(resume_queue=False), daemon=True).start()
 
-    def resume_thread(self):
+    def resume_thread(self) -> None:
         """Resume search directly from existing pending_queue."""
         if self.running or not self.pending_queue:
             return
@@ -1870,13 +1880,13 @@ class MainWindow:
         self.set_statusbar_color("#2980b9", msg=f"Keresés folytatása ({len(self.pending_queue)} URL)...")
         threading.Thread(target=lambda: self.run_search(resume_queue=True), daemon=True).start()
 
-    def stop(self):
+    def stop(self) -> None:
         """Immediately flag stop and update UI without getting stuck."""
         self.running = False
         self.set_statusbar_color("#e67e22", msg="Leállítás folyamatban...")
         self.log_msg("[STOP] Leállítás kérve...", force=True, tag="tor_err")
 
-    def run_search(self, resume_queue=False):
+    def run_search(self, resume_queue: bool = False) -> None:
         self.running = True
         self.btn_start.config(state=tk.DISABLED)
         self.btn_resume.config(state=tk.DISABLED)
@@ -2052,7 +2062,6 @@ class MainWindow:
 
                 self.root.after(0, _update)
 
-        # Handle clean completion or interrupted state
         with self.lock:
             self.in_progress_urls.clear()
             self.stats["total"] = all_onions_count
@@ -2060,7 +2069,7 @@ class MainWindow:
         self.save_state(silent=False)
         self.save_deadlist()
 
-        def _finish_ui():
+        def _finish_ui() -> None:
             self.lbl_total.config(text=f"{all_onions_count}")
             self.lbl_checked.config(text=f"{len(self.checked_urls)}")
             self.btn_start.config(state=tk.NORMAL)
@@ -2086,5 +2095,5 @@ class MainWindow:
         self.running = False
 
 
-# Alias for backward compatibility
+# Backward compatibility
 OnionGUI = MainWindow

@@ -7,47 +7,44 @@ import React from 'react';
 import {
   FolderTree,
   CheckCircle2,
+  FileCheck2,
+  Sliders,
+  Terminal,
+  FileCode,
+  ShieldCheck,
   Zap,
-  Gauge,
-  Database,
-  Layers,
-  Activity,
-  Cpu,
-  RefreshCw,
-  HardDrive,
-  FileCode2,
 } from 'lucide-react';
 
 export default function App() {
-  const perfFeatures = [
+  const qualityFeatures = [
     {
-      title: 'Async Httpx / Aiohttp Kliens & Közös Socket Pool',
-      desc: 'Megszűnt a szálankénti izolált session: egyetlen aszinkron kapcsolatkészlet (shared connection pool) kezeli a párhuzamos lekéréseket, 10-50x gyorsabb socket-újrahasznosítással.',
-      icon: Zap,
-      color: 'text-amber-400',
-    },
-    {
-      title: 'lxml HTML Parser (3-5x Gyorsabb DOM Feldolgozás)',
-      desc: 'A lassú html.parser helyett a C-alapú lxml motor fut (BeautifulSoup(html, "lxml")), ami drasztikusan lecsökkenti a nagyméretű oldalak feldolgozási idejét.',
-      icon: Gauge,
-      color: 'text-cyan-400',
-    },
-    {
-      title: 'Csak Inkrementális Pending Mentés (save_incremental_pending)',
-      desc: 'Keresés közben (pl. 10 találatonként) már NEM íródik újra a teljes adatbázis vagy JSON fájl; kizárólag az új delta rekordok mentődnek egyetlen gyors WAL tranzakcióban.',
-      icon: HardDrive,
-      color: 'text-emerald-400',
-    },
-    {
-      title: 'Másodlagos Adatbázis Indexek (results.lang, cat, ts, fp)',
-      desc: 'idx_results_lang, idx_results_cat, idx_results_ts és idx_results_fp B-Tree indexekkel a szűrés, rendezés és ellenőrzés O(log N) sebességűvé vált százezres rekordoknál is.',
-      icon: Database,
+      title: 'Teljes Python Típusannotáció (Type Hints)',
+      desc: 'Minden függvény és metódus (pl. detect_language(text: str, html_lang_attr: str = "") -> str, matches_precise_filter(...)) szigorú típusannotációt kapott (Optional, Tuple, Dict, List).',
+      icon: FileCheck2,
       color: 'text-indigo-400',
     },
     {
-      title: 'Nyelv és Kategória Gyorsítótárazás Fingerprint Alapján',
-      desc: 'A tartalom-ujjlenyomat (SHA-256) alapján a nyelv és kategória besorolás memóriában és az adatbázisban is cache-elődik; azonos tartalomnál 0 ms alatt tér vissza újraszámolás nélkül.',
-      icon: Cpu,
+      title: 'Szabványos Logging Modul & TkLogHandler',
+      desc: 'A közvetlen UI kiírás helyett a Python beépített logging modulja fut: egyedi TkLogHandler fogadja a LogRecord eseményeket és továbbítja őket szálbiztosan a felületi naplóhoz.',
+      icon: Terminal,
+      color: 'text-cyan-400',
+    },
+    {
+      title: 'Konstansok & Varázsszámok Felszámolása',
+      desc: 'Központi config.py modulba szervezett konstansok: DEFAULT_TIMEOUT_GET=20, MIN_HTML_BODY_LENGTH=300, MAX_CONTENT_TEXT_LENGTH=8000, MIN_NEWNYM_INTERVAL_AUTO=12.0 stb.',
+      icon: FileCode,
+      color: 'text-amber-400',
+    },
+    {
+      title: 'Perzisztens Konfigfájl (~/.config/onion_search/config.json)',
+      desc: 'ConfigManager és AppConfig dataclass: a portok, szálak száma (workers), sötét mód, küszöbértékek és keresőkifejezések automatikusan mentődnek és induláskor betöltődnek.',
+      icon: Sliders,
+      color: 'text-emerald-400',
+    },
+    {
+      title: 'Átfogó Unit Tesztkészlet (52/52 Sikeres Teszt)',
+      desc: 'Részletes egységtesztek a detect_language (nyelvek & HTML attr), detect_category (súlyok & DOM), matches_precise_filter (AND/OR/NOT/Regex) és parse_list függvényekre.',
+      icon: ShieldCheck,
       color: 'text-purple-400',
     },
   ];
@@ -60,15 +57,15 @@ export default function App() {
           <div>
             <div className="flex items-center gap-3">
               <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-xs px-2.5 py-0.5 rounded font-mono font-semibold">
-                PERFORMANCE & SCALABILITY ENGINE
+                CODE QUALITY & TEST SUITE
               </span>
-              <span className="text-slate-500 text-sm">v4.8.3 High-Throughput</span>
+              <span className="text-slate-500 text-sm">v4.8.4 Robust Release</span>
             </div>
             <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight mt-2 text-white">
-              Onion Kereső — Teljesítmény & Skálázhatóság
+              Onion Kereső — Kódminőség & Teszteltség
             </h1>
             <p className="text-slate-400 text-sm md:text-base mt-1">
-              Async socket-újrafelhasználás, C-alapú lxml parser, zéró redundanciás delta mentés, SQLite indexek és fingerprint cache.
+              Szigorú típusannotációk, szabványos Python logging, JSON konfigurációs perzisztencia és 52 automatizált egységteszt.
             </p>
           </div>
 
@@ -77,7 +74,7 @@ export default function App() {
             <div>
               <div className="text-xs text-slate-400 font-medium">Pytest Tesztlefedettség</div>
               <div className="text-emerald-400 font-bold font-mono text-sm">
-                29 / 29 Sikeres (100% Zöld)
+                52 / 52 Sikeres (100% Zöld)
               </div>
             </div>
           </div>
@@ -87,11 +84,11 @@ export default function App() {
         <section className="space-y-4">
           <div className="flex items-center gap-2 text-slate-200 font-semibold">
             <FolderTree className="w-5 h-5 text-emerald-400" />
-            <h2 className="text-lg">Megvalósított Skálázhatósági Optimalizációk</h2>
+            <h2 className="text-lg">Megvalósított Kódminőségi Fejlesztések</h2>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {perfFeatures.map((item, idx) => {
+            {qualityFeatures.map((item, idx) => {
               const Icon = item.icon;
               return (
                 <div
@@ -111,41 +108,48 @@ export default function App() {
           </div>
         </section>
 
-        {/* Performance Architecture Diagram */}
+        {/* Configuration Schema */}
         <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
-          <h2 className="text-base font-semibold text-slate-200">Optimalizált Adatáramlás (Throughput Architecture)</h2>
+          <h2 className="text-base font-semibold text-slate-200">Konfiguráció & Naplózási Architektúra</h2>
           <pre className="font-mono text-xs bg-slate-950 p-4 rounded-lg text-slate-300 overflow-x-auto leading-relaxed border border-slate-800">
-{`Keresési Folyamat
-  │
-  ├──► Async Client (httpx / aiohttp):
-  │      Egyetlen közös socket készlet keep-alive-val;
-  │      Nincs szálankénti socket-duplikáció, 10-50x hatékonyabb hálózati I/O.
-  │
-  ├──► C-alapú lxml Motor:
-  │      BeautifulSoup(html, "lxml") -> 3-5x gyorsabb DOM faépítés és szövegkinyerés.
-  │
-  ├──► Fingerprint Cache (LRU + SQLite):
-  │      extract_fingerprint(text) -> ha a fingerprint már ismert,
-  │      a nyelv és kategória azonnal (0 ms alatt) a gyorsítótárból tér vissza.
-  │
-  ├──► Inkrementális Delta Perzisztencia (save_incremental_pending):
-  │      Keresés közben CSAK a pending rekordok íródnak WAL tranzakcióval;
-  │      ZÉRÓ teljes tábla / JSON újraírás a futás alatt.
-  │
-  └──► B-Tree Másodlagos Indexek:
-         results(lang), results(category), results(ts DESC), results(fp).`}
+{`~/.config/onion_search/config.json
+{
+  "socks_port": "9050",
+  "ctrl_port": "9051",
+  "workers": 6,
+  "backend": "sqlite",
+  "dark_mode": true,
+  "auto_newnym_success": true,
+  "auto_newnym_total": true,
+  "success_threshold": 50,
+  "total_threshold": 100,
+  "auto_save": true,
+  "live_filtering": true,
+  "timeout_get": 20,
+  "domain_delay": 1.0,
+  "queries": "forum, board, wiki, library"
+}
+
+Standard Logging Flow:
+  logger.info("msg", extra={"tag": "ok"})
+    │
+    └──► TkLogHandler (logging.Handler)
+           │
+           └──► LogPanel.log_msg(msg, tag="ok")
+                  │
+                  └──► In-memory Buffer + Dynamic Filtered View`}
           </pre>
         </section>
 
         {/* Verification Summary */}
         <footer className="text-xs text-slate-500 border-t border-slate-800 pt-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div>Onion Kereső v4.8.3 — Nagy Átbocsátóképességű Motor</div>
+          <div>Onion Kereső v4.8.4 — Termelési Minőség</div>
           <div className="flex items-center gap-4">
             <span className="flex items-center gap-1.5 text-emerald-400">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              29/29 Pytest Sikeres
+              52/52 Pytest Sikeres
             </span>
-            <span className="text-slate-400 font-mono">High-Throughput Production</span>
+            <span className="text-slate-400 font-mono">Clean Architecture</span>
           </div>
         </footer>
       </div>

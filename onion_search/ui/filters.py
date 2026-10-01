@@ -1,56 +1,58 @@
 """
 Filter panel UI and matching logic for language, category, and precise queries.
+Includes full type annotations.
 """
 import re
 import tkinter as tk
 from tkinter import ttk
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from onion_search.utils.helpers import parse_list
 
 
 def matches_precise_filter(
-    title,
-    text,
-    enabled=False,
-    must_all="",
-    must_any="",
-    must_not="",
-    title_contains="",
-    regex="",
-    min_len=0,
-    lang="",
-    category="",
-):
+    title: str,
+    text: str,
+    enabled: bool = False,
+    must_all: str = "",
+    must_any: str = "",
+    must_not: str = "",
+    title_contains: str = "",
+    regex: str = "",
+    min_len: int = 0,
+    lang: str = "",
+    category: str = "",
+) -> Tuple[bool, str]:
     """Pure filtering function for testing and standalone execution."""
     if not enabled:
         return True, "OK"
-    t_lower = (title + " " + text).lower()
-    title_lower = title.lower()
+    t_lower: str = (title + " " + text).lower()
+    title_lower: str = title.lower()
 
-    must_all_list = parse_list(must_all)
+    must_all_list: List[str] = parse_list(must_all)
     for kw in must_all_list:
         if kw not in t_lower:
             return False, f"hiányzik MUST ALL: {kw}"
 
-    must_any_list = parse_list(must_any)
+    must_any_list: List[str] = parse_list(must_any)
     if must_any_list:
         if not any(kw in t_lower for kw in must_any_list):
             return False, f"egyik ANY sem talalhato: {must_any_list}"
 
-    must_not_list = parse_list(must_not)
+    must_not_list: List[str] = parse_list(must_not)
     for kw in must_not_list:
         if kw in t_lower:
             return False, f"kizart NOT talalat: {kw}"
 
-    title_c = title_contains.strip().lower()
+    title_c: str = title_contains.strip().lower()
     if title_c:
-        tcs = [p.strip() for p in title_c.split(",") if p.strip()]
+        tcs: List[str] = [p.strip() for p in title_c.split(",") if p.strip()]
         if not any(tc in title_lower for tc in tcs):
             return False, f"cim nem tartalmazza: {title_c}"
 
     if min_len and len(text) < min_len:
         return False, f"tul rovid {len(text)} < {min_len}"
 
-    regex_pat = regex.strip()
+    regex_pat: str = regex.strip()
     if regex_pat:
         try:
             if not re.search(regex_pat, text, re.IGNORECASE):
@@ -64,7 +66,9 @@ def matches_precise_filter(
 class FilterPanel(ttk.Frame):
     """Encapsulates filter UI controls (quick language/category and precise keywords) with live filtering."""
 
-    def __init__(self, parent, on_filter_changed=None):
+    def __init__(
+        self, parent: tk.Widget, on_filter_changed: Optional[Callable[[], None]] = None
+    ) -> None:
         super().__init__(parent)
         self.on_filter_changed = on_filter_changed
 
@@ -84,7 +88,7 @@ class FilterPanel(ttk.Frame):
         self._build_ui()
         self._setup_traces()
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         # 1. Precise filter frame
         precise_frame = ttk.LabelFrame(self, text="🔍 Precíz egyedi keresés", padding=4)
         precise_frame.pack(fill=tk.X, padx=8, pady=2)
@@ -175,9 +179,9 @@ class FilterPanel(ttk.Frame):
         )
         self.lbl_filter_info.pack(side=tk.LEFT, padx=8)
 
-    def _setup_traces(self):
+    def _setup_traces(self) -> None:
         """Bind variable traces for instant live filtering."""
-        def _on_var_change(*args):
+        def _on_var_change(*args) -> None:
             if self.live_filter_var.get():
                 self._trigger_change()
 
@@ -195,11 +199,11 @@ class FilterPanel(ttk.Frame):
             except Exception:
                 pass
 
-    def _trigger_change(self):
+    def _trigger_change(self) -> None:
         if self.on_filter_changed:
             self.on_filter_changed()
 
-    def reset_precise(self):
+    def reset_precise(self) -> None:
         self.must_all_var.set("")
         self.must_any_var.set("")
         self.must_not_var.set("")
@@ -210,12 +214,14 @@ class FilterPanel(ttk.Frame):
         self.lbl_precise_info.config(text="")
         self._trigger_change()
 
-    def reset_filters(self):
+    def reset_filters(self) -> None:
         self.lang_filter_var.set("all")
         self.category_filter_var.set("all")
         self._trigger_change()
 
-    def matches_precise(self, title, text, lang="", category=""):
+    def matches_precise(
+        self, title: str, text: str, lang: str = "", category: str = ""
+    ) -> Tuple[bool, str]:
         return matches_precise_filter(
             title=title,
             text=text,
@@ -230,15 +236,15 @@ class FilterPanel(ttk.Frame):
             category=category,
         )
 
-    def is_item_visible(self, item):
-        lang = self.lang_filter_var.get()
-        cat = self.category_filter_var.get()
+    def is_item_visible(self, item: Dict[str, Any]) -> Tuple[bool, str]:
+        lang: str = self.lang_filter_var.get()
+        cat: str = self.category_filter_var.get()
         if lang != "all" and item.get("lang", "en") != lang:
             return False, "language mismatch"
         if cat != "all" and item.get("category", "other") != cat:
             return False, "category mismatch"
         if self.enable_precise_var.get():
-            full_text = item.get("snippet", "") + " " + item.get("title", "")
+            full_text: str = item.get("snippet", "") + " " + item.get("title", "")
             ok, reason = self.matches_precise(
                 item.get("title", ""), full_text, item.get("lang", ""), item.get("category", "")
             )
@@ -246,8 +252,8 @@ class FilterPanel(ttk.Frame):
                 return False, reason
         return True, "OK"
 
-    def set_counts(self, shown, total, filtered_out):
-        lang = self.lang_filter_var.get()
-        cat = self.category_filter_var.get()
+    def set_counts(self, shown: int, total: int, filtered_out: int) -> None:
+        lang: str = self.lang_filter_var.get()
+        cat: str = self.category_filter_var.get()
         self.lbl_filter_info.config(text=f"Szűrő: {lang}/{cat} ({shown}/{total})")
         self.lbl_precise_info.config(text=f"Precíz: {shown} látszik, {filtered_out} kiszűrve")

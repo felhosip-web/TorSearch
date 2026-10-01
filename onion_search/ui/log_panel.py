@@ -1,23 +1,75 @@
 """
 Log panel UI component with search filtering, category tabs, and color-tagged message history.
+Integrates standard Python logging module via TkLogHandler.
 """
+import logging
 import tkinter as tk
 from tkinter import ttk, scrolledtext
+from typing import List, Optional, Tuple
+
+logger = logging.getLogger("onion_search")
+
+
+class TkLogHandler(logging.Handler):
+    """Custom logging.Handler that directs standard Python log records into LogPanel."""
+
+    def __init__(self, log_panel: "LogPanel") -> None:
+        super().__init__()
+        self.log_panel = log_panel
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            tag = getattr(record, "tag", None)
+            if tag is None:
+                if record.levelno >= logging.ERROR:
+                    tag = "error"
+                elif record.levelno >= logging.WARNING:
+                    tag = "tor_err"
+                elif "[OK]" in msg:
+                    tag = "ok"
+                elif "[CLONE]" in msg:
+                    tag = "clone"
+                elif "HALOTT" in msg or "[DEAD]" in msg:
+                    tag = "dead"
+                elif "[NEWNYM]" in msg:
+                    tag = "newnym"
+                elif "FILTER" in msg or "PRECISE" in msg:
+                    tag = "filter"
+                elif "TOR" in msg and "OK" in msg:
+                    tag = "tor_ok"
+                elif "SAVE" in msg or "LOAD" in msg:
+                    tag = "save"
+                elif "START" in msg:
+                    tag = "start"
+
+            self.log_panel.log_msg(msg, force=True, tag=tag)
+        except Exception:
+            self.handleError(record)
 
 
 class LogPanel(ttk.Frame):
     """Encapsulates the scrolled log area, text search, category buttons, and tag stylings."""
 
-    def __init__(self, parent):
+    def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent)
         self.filtered_log_var = tk.BooleanVar(value=False)
         self.search_var = tk.StringVar(value="")
         self.category_var = tk.StringVar(value="all")  # all, ok, error, newnym, tor
-        self.log_history = []  # List of tuples: (msg, tag)
+        self.log_history: List[Tuple[str, Optional[str]]] = []  # List of tuples: (msg, tag)
         self._build_ui()
         self._setup_traces()
+        self._setup_logging_handler()
 
-    def _build_ui(self):
+    def _setup_logging_handler(self) -> None:
+        """Attach TkLogHandler to 'onion_search' logger."""
+        self.handler = TkLogHandler(self)
+        formatter = logging.Formatter("%(message)s")
+        self.handler.setFormatter(formatter)
+        logger.addHandler(self.handler)
+        logger.setLevel(logging.INFO)
+
+    def _build_ui(self) -> None:
         # 1. Log Toolbar
         log_header = ttk.Frame(self)
         log_header.pack(fill=tk.X, pady=(4, 2))
@@ -54,7 +106,7 @@ class LogPanel(ttk.Frame):
 
         self.apply_tag_styles()
 
-    def apply_tag_styles(self, dark_mode=False):
+    def apply_tag_styles(self, dark_mode: bool = False) -> None:
         """Configure color schemes for log tags in light or dark mode."""
         if dark_mode:
             self.log_text.tag_config("ok", foreground="#a6e3a1", background="#18342b")
@@ -129,8 +181,8 @@ class LogPanel(ttk.Frame):
                 font=("Consolas", 8, "bold"),
             )
 
-    def _setup_traces(self):
-        def _on_search(*args):
+    def _setup_traces(self) -> None:
+        def _on_search(*args) -> None:
             self.refresh_view()
 
         try:
@@ -138,11 +190,11 @@ class LogPanel(ttk.Frame):
         except Exception:
             pass
 
-    def clear(self):
+    def clear(self) -> None:
         self.log_history.clear()
         self.log_text.delete("1.0", tk.END)
 
-    def _matches_filters(self, msg, tag):
+    def _matches_filters(self, msg: str, tag: Optional[str]) -> bool:
         # 1. Search filter
         query = self.search_var.get().strip().lower()
         if query and query not in msg.lower():
@@ -179,7 +231,7 @@ class LogPanel(ttk.Frame):
 
         return True
 
-    def refresh_view(self):
+    def refresh_view(self) -> None:
         """Re-render visible log messages from in-memory history matching active filters."""
         self.log_text.delete("1.0", tk.END)
         for msg, tag in self.log_history:
@@ -187,7 +239,7 @@ class LogPanel(ttk.Frame):
                 self.log_text.insert(tk.END, msg + "\n", tag if tag else "")
         self.log_text.see(tk.END)
 
-    def log_msg(self, msg, force=False, tag=None):
+    def log_msg(self, msg: str, force: bool = False, tag: Optional[str] = None) -> None:
         """Append log message thread-safely with tags and history buffer."""
         if tag is None:
             if "[OK]" in msg:
@@ -210,7 +262,6 @@ class LogPanel(ttk.Frame):
                 tag = "start"
 
         self.log_history.append((msg, tag))
-        # Keep max 5000 lines in history
         if len(self.log_history) > 5000:
             self.log_history.pop(0)
 

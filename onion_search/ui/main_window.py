@@ -1,11 +1,16 @@
 """
-Main application window coordinating UI components, search lifecycle, and persistence.
+Main application window coordinating UI components, search lifecycle, persistence, and UX features.
+Includes: Dark mode theme, result preview inspector, live filtering, queue resume, and advanced export.
 """
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import json
+import os
 import random
+import re
 import sqlite3
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -20,9 +25,11 @@ from onion_search.ui.filters import FilterPanel
 from onion_search.ui.log_panel import LogPanel
 from onion_search.utils.helpers import DB_FILE, STATE_DIR, fmt_ts
 
+MAX_MEMORY_CACHE = 50000
+
 
 class MainWindow:
-    """Main window for Onion Kereso."""
+    """Main window for Onion Kereso with enhanced UI/UX capabilities."""
 
     def __init__(
         self,
@@ -35,7 +42,7 @@ class MainWindow:
     ):
         self.root = root
         self.root.title("Onion Kereso v4.8 - secure & stable")
-        self.root.geometry("1350x920")
+        self.root.geometry("1400x940")
 
         # Injected dependencies with default fallback
         self.detector = detector or ContentDetector()
@@ -47,9 +54,11 @@ class MainWindow:
         )
 
         # In-memory application state
-        self.seen_fp = {}
-        self.seen_btc = {}
+        self.seen_fp = OrderedDict()
+        self.seen_btc = OrderedDict()
         self.checked_urls = set()
+        self.in_progress_urls = set()
+        self.pending_queue = []  # Remaining unvisited URLs for clean resume
         self.dead_blacklist = {}
         self.results = []
         self.running = False
@@ -71,6 +80,7 @@ class MainWindow:
         self.pending_dead = {}
 
         # Tkinter variables
+        self.dark_mode_var = tk.BooleanVar(value=True)  # Dark mode default
         self.backend_var = tk.StringVar(value="sqlite")
         self.auto_newnym_success_var = tk.BooleanVar(value=True)
         self.auto_newnym_total_var = tk.BooleanVar(value=True)
@@ -80,8 +90,8 @@ class MainWindow:
         self.status_var = tk.StringVar(value="Készen - v4.8 secure")
 
         # Build UI layout
-        self.setup_styles()
         self.setup_ui()
+        self.apply_theme()
 
         # Initialize state & Tor checks
         self.load_state(silent=True)
@@ -102,17 +112,204 @@ class MainWindow:
             else self.json_backend
         )
 
-    def setup_styles(self):
+    def _cache_fp(self, fp, url):
+        self.seen_fp[fp] = url
+        if len(self.seen_fp) > MAX_MEMORY_CACHE:
+            self.seen_fp.popitem(last=False)
+
+    def _cache_btc(self, btc, url):
+        self.seen_btc[btc] = url
+        if len(self.seen_btc) > MAX_MEMORY_CACHE:
+            self.seen_btc.popitem(last=False)
+
+    def is_fp_seen(self, fp):
+        with self.lock:
+            if fp in self.seen_fp:
+                return True, self.seen_fp[fp]
+
+        if self.backend_var.get() == "sqlite":
+            db_url = self.sqlite_backend.get_fingerprint_url(fp)
+            if db_url:
+                with self.lock:
+                    self._cache_fp(fp, db_url)
+                return True, db_url
+        return False, None
+
+    def is_btc_seen(self, btc):
+        with self.lock:
+            if btc in self.seen_btc:
+                return True, self.seen_btc[btc]
+
+        if self.backend_var.get() == "sqlite":
+            db_url = self.sqlite_backend.get_btc_url(btc)
+            if db_url:
+                with self.lock:
+                    self._cache_btc(btc, db_url)
+                return True, db_url
+        return False, None
+
+    def apply_theme(self):
+        """Configure and toggle modern dark/light themes via ttk.Style."""
+        dark = self.dark_mode_var.get()
         style = ttk.Style()
         try:
             style.theme_use("clam")
         except Exception:
             pass
-        style.configure(
-            "green.Horizontal.TProgressbar",
-            background="#2ecc71",
-            troughcolor="#ecf0f1",
-        )
+
+        if dark:
+            bg_main = "#181926"
+            bg_panel = "#24273a"
+            bg_card = "#313244"
+            fg_main = "#cad3f5"
+            fg_muted = "#a5adcb"
+            accent = "#8aadf4"
+
+            self.root.configure(bg=bg_main)
+            style.configure(".", background=bg_main, foreground=fg_main)
+            style.configure("TFrame", background=bg_main)
+            style.configure("TLabelframe", background=bg_main, foreground=accent)
+            style.configure("TLabelframe.Label", background=bg_main, foreground=accent)
+            style.configure("TLabel", background=bg_main, foreground=fg_main)
+            style.configure("TButton", background=bg_panel, foreground=fg_main)
+            style.configure("TCheckbutton", background=bg_main, foreground=fg_main)
+            style.configure("TRadiobutton", background=bg_main, foreground=fg_main)
+            style.configure("TEntry", fieldbackground=bg_panel, foreground=fg_main)
+            style.configure("TCombobox", fieldbackground=bg_panel, foreground=fg_main)
+            style.configure("TSpinbox", fieldbackground=bg_panel, foreground=fg_main)
+            style.configure(
+                "Treeview",
+                background=bg_panel,
+                foreground=fg_main,
+                fieldbackground=bg_panel,
+                rowheight=24,
+            )
+            style.configure(
+                "Treeview.Heading",
+                background=bg_card,
+                foreground=fg_main,
+                font=("TkDefaultFont", 8, "bold"),
+            )
+            style.map(
+                "Treeview",
+                background=[("selected", "#3e5879")],
+                foreground=[("selected", "white")],
+            )
+            style.configure(
+                "green.Horizontal.TProgressbar",
+                background="#a6e3a1",
+                troughcolor=bg_card,
+            )
+
+            # Update Canvas and ScrolledText colors
+            self.canvas_socks.configure(bg=bg_main)
+            self.canvas_ctrl.configure(bg=bg_main)
+            self.extra_text.configure(
+                bg=bg_panel, fg=fg_main, insertbackground=fg_main
+            )
+            self.log_panel.log_text.configure(
+                bg=bg_panel, fg=fg_main, insertbackground=fg_main
+            )
+            self.log_panel.apply_tag_styles(dark_mode=True)
+            self.status_bar.configure(bg="#11111b")
+            self.lbl_statusbar.configure(bg="#11111b", fg=fg_main)
+
+            # Update stats cards
+            cards = [
+                (self.card_total, self.lbl_total, "#24273a", fg_muted, fg_main),
+                (self.card_checked, self.lbl_checked, "#18342b", "#94e2d5", "#a6e3a1"),
+                (self.card_alive, self.lbl_alive, "#142c26", "#a6e3a1", "#a6e3a1"),
+                (self.card_dead, self.lbl_dead, "#3b1d24", "#f38ba8", "#f38ba8"),
+                (self.card_clone, self.lbl_clone, "#332a1c", "#f9e2af", "#f9e2af"),
+                (self.card_unique, self.lbl_unique, "#1e293b", "#89b4fa", "#89b4fa"),
+                (self.card_filtered, self.lbl_filtered, "#2a1f3d", "#cba6f7", "#cba6f7"),
+            ]
+            for c_frame, c_lbl, c_bg, c_head_fg, c_val_fg in cards:
+                c_frame.configure(bg=c_bg)
+                for child in c_frame.winfo_children():
+                    if child == c_lbl:
+                        child.configure(bg=c_bg, fg=c_val_fg)
+                    else:
+                        child.configure(bg=c_bg, fg=c_head_fg)
+
+            self.btn_theme.config(text="☀️ Világos mód")
+        else:
+            bg_main = "#f4f5f7"
+            bg_panel = "#ffffff"
+            bg_card = "#ecf0f1"
+            fg_main = "#2c3e50"
+            fg_muted = "#7f8c8d"
+
+            self.root.configure(bg=bg_main)
+            style.configure(".", background=bg_main, foreground=fg_main)
+            style.configure("TFrame", background=bg_main)
+            style.configure("TLabelframe", background=bg_main, foreground="#2980b9")
+            style.configure("TLabelframe.Label", background=bg_main, foreground="#2980b9")
+            style.configure("TLabel", background=bg_main, foreground=fg_main)
+            style.configure("TButton", background=bg_card, foreground=fg_main)
+            style.configure("TCheckbutton", background=bg_main, foreground=fg_main)
+            style.configure("TRadiobutton", background=bg_main, foreground=fg_main)
+            style.configure("TEntry", fieldbackground=bg_panel, foreground=fg_main)
+            style.configure("TCombobox", fieldbackground=bg_panel, foreground=fg_main)
+            style.configure("TSpinbox", fieldbackground=bg_panel, foreground=fg_main)
+            style.configure(
+                "Treeview",
+                background=bg_panel,
+                foreground=fg_main,
+                fieldbackground=bg_panel,
+                rowheight=24,
+            )
+            style.configure(
+                "Treeview.Heading",
+                background="#dfe6e9",
+                foreground=fg_main,
+                font=("TkDefaultFont", 8, "bold"),
+            )
+            style.map(
+                "Treeview",
+                background=[("selected", "#3498db")],
+                foreground=[("selected", "white")],
+            )
+            style.configure(
+                "green.Horizontal.TProgressbar",
+                background="#2ecc71",
+                troughcolor=bg_card,
+            )
+
+            self.canvas_socks.configure(bg=bg_main)
+            self.canvas_ctrl.configure(bg=bg_main)
+            self.extra_text.configure(
+                bg=bg_panel, fg=fg_main, insertbackground=fg_main
+            )
+            self.log_panel.log_text.configure(
+                bg=bg_panel, fg=fg_main, insertbackground=fg_main
+            )
+            self.log_panel.apply_tag_styles(dark_mode=False)
+            self.status_bar.configure(bg="#2c3e50")
+            self.lbl_statusbar.configure(bg="#2c3e50", fg="white")
+
+            cards = [
+                (self.card_total, self.lbl_total, "#ecf0f1", "#7f8c8d", "#2c3e50"),
+                (self.card_checked, self.lbl_checked, "#d5f5e3", "#27ae60", "#1e8449"),
+                (self.card_alive, self.lbl_alive, "#d4efdf", "#229954", "#1a7a3a"),
+                (self.card_dead, self.lbl_dead, "#fadbd8", "#c0392b", "#922b21"),
+                (self.card_clone, self.lbl_clone, "#fdebd0", "#e67e22", "#b9770e"),
+                (self.card_unique, self.lbl_unique, "#d6eaf8", "#2980b9", "#1a5276"),
+                (self.card_filtered, self.lbl_filtered, "#e8daef", "#8e44ad", "#6c3483"),
+            ]
+            for c_frame, c_lbl, c_bg, c_head_fg, c_val_fg in cards:
+                c_frame.configure(bg=c_bg)
+                for child in c_frame.winfo_children():
+                    if child == c_lbl:
+                        child.configure(bg=c_bg, fg=c_val_fg)
+                    else:
+                        child.configure(bg=c_bg, fg=c_head_fg)
+
+            self.btn_theme.config(text="🌙 Sötét mód")
+
+    def toggle_theme(self):
+        self.dark_mode_var.set(not self.dark_mode_var.get())
+        self.apply_theme()
 
     def setup_ui(self):
         # 1. Top toolbar
@@ -156,6 +353,11 @@ class MainWindow:
 
         persist = ttk.Frame(top)
         persist.pack(side=tk.RIGHT)
+        self.btn_theme = ttk.Button(
+            persist, text="🌙 Sötét mód", command=self.toggle_theme
+        )
+        self.btn_theme.pack(side=tk.LEFT, padx=3)
+
         ttk.Button(
             persist, text="💾", width=3, command=lambda: self.save_state(silent=False)
         ).pack(side=tk.LEFT, padx=1)
@@ -243,7 +445,7 @@ class MainWindow:
         )
         self.filters_panel.pack(fill=tk.X)
 
-        # 4. Main body (left = controls, stats, logs; right = results treeview)
+        # 4. Main body
         mid = ttk.Frame(self.root, padding=8)
         mid.pack(fill=tk.BOTH, expand=True)
 
@@ -260,6 +462,10 @@ class MainWindow:
             btn, text="▶ Start", command=self.start_thread
         )
         self.btn_start.pack(side=tk.LEFT, padx=2)
+        self.btn_resume = ttk.Button(
+            btn, text="⏩ Folytatás (Resume)", command=self.resume_thread, state=tk.DISABLED
+        )
+        self.btn_resume.pack(side=tk.LEFT, padx=2)
         self.btn_stop = ttk.Button(
             btn, text="⏹ Stop", command=self.stop, state=tk.DISABLED
         )
@@ -451,7 +657,7 @@ class MainWindow:
         self.log_panel = LogPanel(left)
         self.log_panel.pack(fill=tk.BOTH, expand=True)
 
-        # 5. Right side (Treeview and export toolbar)
+        # 5. Right side (Treeview, preview inspector, export toolbar)
         right = ttk.Frame(mid)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(8, 0))
 
@@ -471,33 +677,18 @@ class MainWindow:
         ttk.Button(cf, text="📋 Összes", command=self.copy_all_urls).pack(
             side=tk.LEFT, padx=2
         )
-
-        export_frame = ttk.LabelFrame(cf, text="Export")
-        export_frame.pack(side=tk.LEFT, padx=8)
-        ttk.Button(
-            export_frame,
-            text="TXT",
-            command=lambda: self.export_file("txt"),
-            width=4,
-        ).pack(side=tk.LEFT, padx=1)
-        ttk.Button(
-            export_frame,
-            text="CSV",
-            command=lambda: self.export_file("csv"),
-            width=4,
-        ).pack(side=tk.LEFT, padx=1)
-        ttk.Button(
-            export_frame,
-            text="JSON",
-            command=lambda: self.export_file("json"),
-            width=5,
-        ).pack(side=tk.LEFT, padx=1)
+        ttk.Button(cf, text="👁 Előnézet", command=self.open_selected_preview).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(cf, text="📦 Export...", command=self.open_export_dialog).pack(
+            side=tk.LEFT, padx=4
+        )
         ttk.Button(cf, text="🔍 SQL", command=self.open_sql_query).pack(
             side=tk.LEFT, padx=4
         )
 
         cols = ("title", "url", "lang", "category", "last_check", "info")
-        self.tree = ttk.Treeview(right, columns=cols, show="headings", height=25)
+        self.tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
         self.tree.heading("title", text="Cím")
         self.tree.heading("url", text=".onion")
         self.tree.heading("lang", text="Nyelv")
@@ -538,16 +729,53 @@ class MainWindow:
         self.context_menu.add_command(
             label="📋 URL másolás", command=self.copy_selected_url
         )
+        self.context_menu.add_command(
+            label="👁 Előnézet megnyitása", command=self.open_selected_preview
+        )
+        self.context_menu.add_command(
+            label="🌐 Megnyitás Torban", command=self.open_in_tor_browser
+        )
         self.context_menu.add_command(label="🗑 Törlés", command=self.delete_selected)
         self.context_menu.add_separator()
         self.context_menu.add_command(
             label="🔄 NEWNYM most (Ctrl+N)", command=self.manual_newnym_thread
         )
         self.tree.bind("<Button-3>", self.show_context_menu)
-        self.tree.bind("<Double-1>", lambda e: self.copy_selected_url())
+        self.tree.bind("<Double-1>", lambda e: self.open_selected_preview())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.update_inline_preview())
+
+        # 6. Bottom Inspector Preview Pane
+        self.preview_frame = ttk.LabelFrame(
+            right, text="👁 Találat Előnézet & Részletek", padding=6
+        )
+        self.preview_frame.pack(fill=tk.X, pady=(6, 0))
+
+        p_top = ttk.Frame(self.preview_frame)
+        p_top.pack(fill=tk.X)
+        self.lbl_prev_title = ttk.Label(
+            p_top, text="Válassz ki egy találatot...", font=("TkDefaultFont", 9, "bold")
+        )
+        self.lbl_prev_title.pack(side=tk.LEFT)
+        self.lbl_prev_meta = ttk.Label(
+            p_top, text="", font=("TkDefaultFont", 8), foreground="#8e44ad"
+        )
+        self.lbl_prev_meta.pack(side=tk.RIGHT)
+
+        p_url_bar = ttk.Frame(self.preview_frame)
+        p_url_bar.pack(fill=tk.X, pady=2)
+        self.lbl_prev_url = ttk.Label(
+            p_url_bar, text="", foreground="#2980b9", font=("Consolas", 8)
+        )
+        self.lbl_prev_url.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(p_url_bar, text="🌐 Tor Browser", command=self.open_in_tor_browser).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(p_url_bar, text="📋 Másolás", command=self.copy_selected_url).pack(side=tk.RIGHT, padx=2)
+
+        self.prev_text = scrolledtext.ScrolledText(
+            self.preview_frame, height=4, font=("Consolas", 8)
+        )
+        self.prev_text.pack(fill=tk.X, pady=2)
 
     def log_msg(self, msg, force=False, tag=None):
-        """Proxy to LogPanel for backward compatibility and thread safety."""
         self.log_panel.log_msg(msg, force=force, tag=tag)
 
     def set_led(self, canvas, led_id, color):
@@ -602,7 +830,7 @@ class MainWindow:
             f"[FILTER] lang={self.filters_panel.lang_filter_var.get()} "
             f"cat={self.filters_panel.category_filter_var.get()} "
             f"precise={self.filters_panel.enable_precise_var.get()} -> {shown}/{len(self.results)}",
-            force=True,
+            force=False,
             tag="filter",
         )
 
@@ -742,12 +970,6 @@ class MainWindow:
             force=True,
             tag="tor_ok" if ctrl_ok else "tor_err",
         )
-        if not socks_ok:
-            self.log_msg(
-                "[TOR TIPP] 1) Tor Browser legyen NYITVA! 2) pip install pysocks",
-                force=True,
-                tag="error",
-            )
 
         def _update():
             if socks_ok:
@@ -785,6 +1007,101 @@ class MainWindow:
         self.log_msg(f"[BACKEND] Váltás: {backend}", force=True, tag="save")
         self.load_state(silent=False)
         self.load_deadlist()
+
+    def update_inline_preview(self):
+        """Update the bottom preview inspector pane with selected item details."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        item_vals = self.tree.item(sel[0])["values"]
+        if not item_vals or len(item_vals) < 2:
+            return
+        url = item_vals[1]
+
+        # Find full result object
+        res = next((r for r in self.results if r.get("url") == url), None)
+        if not res:
+            res = {
+                "title": item_vals[0],
+                "url": url,
+                "lang": item_vals[2] if len(item_vals) > 2 else "en",
+                "category": item_vals[3] if len(item_vals) > 3 else "other",
+                "ts": time.time(),
+                "snippet": item_vals[5] if len(item_vals) > 5 else "",
+            }
+
+        self.lbl_prev_title.config(text=res.get("title", "Nincs cím"))
+        self.lbl_prev_url.config(text=res.get("url", ""))
+        self.lbl_prev_meta.config(
+            text=f"Nyelv: {res.get('lang','en')} | Kategória: {res.get('category','other')} | Utolsó ellenőrzés: {fmt_ts(res.get('ts'))}"
+        )
+        self.prev_text.delete("1.0", tk.END)
+        self.prev_text.insert(
+            tk.END,
+            f"Snippet: {res.get('snippet', '')}\n\nUjjlenyomat (Fingerprint): {res.get('fp', 'N/A')}",
+        )
+
+    def open_selected_preview(self):
+        """Open detailed modal preview dialog for selected result."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        url = self.tree.item(sel[0])["values"][1]
+        res = next((r for r in self.results if r.get("url") == url), None)
+        if not res:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Előnézet: {res.get('title', url)}")
+        win.geometry("680x420")
+
+        ttk.Label(win, text=res.get("title", ""), font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, padx=10, pady=(10, 2))
+        ttk.Label(win, text=res.get("url", ""), foreground="#2980b9", font=("Consolas", 9)).pack(anchor=tk.W, padx=10, pady=2)
+        ttk.Label(
+            win,
+            text=f"Nyelv: {res.get('lang', 'en')}  |  Kategória: {res.get('category', 'other')}  |  Ujjlenyomat: {res.get('fp', 'N/A')}",
+            font=("TkDefaultFont", 8),
+            foreground="#8e44ad",
+        ).pack(anchor=tk.W, padx=10, pady=2)
+
+        txt = scrolledtext.ScrolledText(win, height=12, font=("Consolas", 9))
+        txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        txt.insert(tk.END, f"--- TARTALOM / SNIPPET ---\n\n{res.get('snippet', '')}\n\n")
+        txt.insert(tk.END, f"Utolsó látogatás: {fmt_ts(res.get('ts'))}\n")
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_row, text="🌐 Megnyitás Torban", command=self.open_in_tor_browser).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="📋 URL másolása", command=self.copy_selected_url).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="Bezárás", command=win.destroy).pack(side=tk.RIGHT, padx=3)
+
+    def open_in_tor_browser(self):
+        """Attempt to launch Tor Browser or copy socks-ready command to clipboard."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        url = self.tree.item(sel[0])["values"][1]
+        self.copy_to_clipboard(url)
+
+        # Look for Tor browser binary
+        candidates = ["torbrowser-launcher", "tor-browser", "firefox"]
+        launched = False
+        for c in candidates:
+            try:
+                subprocess.Popen([c, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                launched = True
+                self.log_msg(f"[TOR LAUNCH] Megnyitva: {c} {url}", force=True, tag="tor_ok")
+                self.set_statusbar_color("#27ae60", msg=f"Megnyitva Tor Browserben: {url[:50]}")
+                break
+            except Exception:
+                pass
+
+        if not launched:
+            self.set_statusbar_color("#2980b9", msg="URL másolva vágólapra (nyisd meg a Tor Browserben)")
+            messagebox.showinfo(
+                "Tor Browser",
+                f"Az URL másolva a vágólapra:\n{url}\n\nNyisd meg a Tor Browserben a megtekintéshez!",
+            )
 
     def open_sql_query(self):
         if self.backend_var.get() != "sqlite":
@@ -832,8 +1149,6 @@ class MainWindow:
                 "replace",
                 "vacuum",
             ]
-            import re
-
             first_word = re.split(r"\s+", q_stripped, 1)[0]
             if first_word not in ("select", "with", "explain"):
                 return False, f"Csak SELECT/WITH engedélyezett, te: {first_word.upper()}"
@@ -996,7 +1311,7 @@ class MainWindow:
                 if pending.get("results"):
                     self.log_msg(
                         f"[SAVE sqlite incremental] {len(pending['results'])} uj találat",
-                        force=True,
+                        force=False,
                         tag="save",
                     )
                 if self.pending_dead:
@@ -1021,6 +1336,7 @@ class MainWindow:
                     "success_count": self.success_count,
                     "total_count": self.total_count,
                     "total_newnym": self.total_newnym,
+                    "pending_queue": list(self.pending_queue),
                     "dead_blacklist": dict(self.dead_blacklist),
                 }
             backend.save(data)
@@ -1054,8 +1370,12 @@ class MainWindow:
                     )
                 return
             with self.lock:
-                self.seen_fp = data.get("seen_fp", {})
-                self.seen_btc = data.get("seen_btc", {})
+                self.seen_fp.clear()
+                for k, v in data.get("seen_fp", {}).items():
+                    self._cache_fp(k, v)
+                self.seen_btc.clear()
+                for k, v in data.get("seen_btc", {}).items():
+                    self._cache_btc(k, v)
                 self.checked_urls = set(data.get("checked_urls", []))
                 self.results = data.get("results", [])
                 self.stats = data.get(
@@ -1065,6 +1385,7 @@ class MainWindow:
                 self.success_count = data.get("success_count", 0)
                 self.total_count = data.get("total_count", 0)
                 self.total_newnym = data.get("total_newnym", 0)
+                self.pending_queue = data.get("pending_queue", [])
 
             self.next_newnym_success = random.randint(
                 int(self.success_threshold_var.get() * 0.8),
@@ -1107,6 +1428,11 @@ class MainWindow:
             if data.get("extra"):
                 self.extra_text.delete("1.0", tk.END)
                 self.extra_text.insert("1.0", data["extra"])
+
+            if self.pending_queue:
+                self.btn_resume.config(state=tk.NORMAL)
+                self.log_msg(f"[RESUME READY] {len(self.pending_queue)} folyamatban lévő cím folytatásra kész!", force=True, tag="save")
+
             self.log_msg(
                 f"[LOAD {self.backend_var.get()}] {len(self.results)} találat",
                 force=True,
@@ -1140,6 +1466,8 @@ class MainWindow:
                 self.seen_fp.clear()
                 self.seen_btc.clear()
                 self.checked_urls.clear()
+                self.in_progress_urls.clear()
+                self.pending_queue.clear()
                 self.results.clear()
                 self.dead_blacklist.clear()
                 self.pending_results = []
@@ -1156,6 +1484,7 @@ class MainWindow:
                     "dead": 0,
                     "filtered": 0,
                 }
+            self.btn_resume.config(state=tk.DISABLED)
             self.tree.delete(*self.tree.get_children())
             for lbl in [
                 self.lbl_total,
@@ -1185,6 +1514,7 @@ class MainWindow:
         item = self.tree.identify_row(event.y)
         if item:
             self.tree.selection_set(item)
+            self.update_inline_preview()
         try:
             self.context_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1227,43 +1557,90 @@ class MainWindow:
                 pass
         self.log_msg(f"[DELETE] {url[:60]}", force=True, tag="dead")
 
-    def export_file(self, fmt="txt"):
+    def open_export_dialog(self):
+        """Open advanced export options dialog (scope, category filter, format)."""
         if not self.results:
-            messagebox.showinfo("Export", "Nincs mit exportálni")
+            messagebox.showinfo("Export", "Nincs mit exportálni!")
             return
-        base = STATE_DIR
-        filtered = []
-        for r in self.results:
-            visible, _ = self.filters_panel.is_item_visible(r)
-            if visible:
-                filtered.append(r)
 
-        if fmt == "txt":
-            p = base / "export.txt"
-            with open(p, "w", encoding="utf-8") as f:
-                for r in filtered:
-                    f.write(
-                        f"{r['url']} # {r['title']} [{r.get('lang','')} {r.get('category','')}]\n"
-                    )
-        elif fmt == "csv":
-            p = base / "export.csv"
-            with open(p, "w", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(
-                    f,
-                    fieldnames=[
-                        "url",
-                        "title",
-                        "snippet",
-                        "fp",
-                        "ts",
-                        "lang",
-                        "category",
-                    ],
-                )
-                w.writeheader()
-                for r in filtered:
-                    w.writerow(
-                        {
+        win = tk.Toplevel(self.root)
+        win.title("📦 Exportálás Testreszabása")
+        win.geometry("450x380")
+        win.resizable(False, False)
+
+        ttk.Label(win, text="Találatok Exportálása", font=("TkDefaultFont", 11, "bold")).pack(pady=(12, 6))
+
+        # Scope
+        scope_frame = ttk.LabelFrame(win, text="Export Hatóköre", padding=8)
+        scope_frame.pack(fill=tk.X, padx=16, pady=6)
+        scope_var = tk.StringVar(value="filtered")
+        ttk.Radiobutton(scope_frame, text=f"Jelenlegi szűrt nézet ({len(self.tree.get_children())} db)", variable=scope_var, value="filtered").pack(anchor=tk.W, pady=2)
+        ttk.Radiobutton(scope_frame, text=f"Összes egyedi találat ({len(self.results)} db)", variable=scope_var, value="all_unique").pack(anchor=tk.W, pady=2)
+
+        # Filters
+        filter_box = ttk.LabelFrame(win, text="Kategória & Nyelv szűkítés", padding=8)
+        filter_box.pack(fill=tk.X, padx=16, pady=6)
+
+        row_cat = ttk.Frame(filter_box)
+        row_cat.pack(fill=tk.X, pady=2)
+        ttk.Label(row_cat, text="Kategória:").pack(side=tk.LEFT)
+        cat_combo = ttk.Combobox(row_cat, values=["all", "forum", "wiki", "library", "news", "market", "other"], state="readonly", width=12)
+        cat_combo.set("all")
+        cat_combo.pack(side=tk.RIGHT)
+
+        row_lang = ttk.Frame(filter_box)
+        row_lang.pack(fill=tk.X, pady=2)
+        ttk.Label(row_lang, text="Nyelv:").pack(side=tk.LEFT)
+        lang_combo = ttk.Combobox(row_lang, values=["all", "hu", "en", "de", "fr", "ru", "es", "other"], state="readonly", width=12)
+        lang_combo.set("all")
+        lang_combo.pack(side=tk.RIGHT)
+
+        # Format
+        fmt_frame = ttk.LabelFrame(win, text="Formátum", padding=8)
+        fmt_frame.pack(fill=tk.X, padx=16, pady=6)
+        fmt_var = tk.StringVar(value="csv")
+        ttk.Radiobutton(fmt_frame, text="CSV (táblázatkezelőkhöz)", variable=fmt_var, value="csv").pack(side=tk.LEFT, padx=6)
+        ttk.Radiobutton(fmt_frame, text="JSON (fejlesztőknek)", variable=fmt_var, value="json").pack(side=tk.LEFT, padx=6)
+        ttk.Radiobutton(fmt_frame, text="TXT (egyszerű lista)", variable=fmt_var, value="txt").pack(side=tk.LEFT, padx=6)
+
+        def _do_export():
+            scope = scope_var.get()
+            selected_cat = cat_combo.get()
+            selected_lang = lang_combo.get()
+            fmt = fmt_var.get()
+
+            if scope == "filtered":
+                source_urls = set(self.tree.item(c)["values"][1] for c in self.tree.get_children())
+                candidates = [r for r in self.results if r.get("url") in source_urls]
+            else:
+                candidates = list(self.results)
+
+            # Apply category and lang if set
+            export_list = []
+            for r in candidates:
+                if selected_cat != "all" and r.get("category", "other") != selected_cat:
+                    continue
+                if selected_lang != "all" and r.get("lang", "en") != selected_lang:
+                    continue
+                export_list.append(r)
+
+            if not export_list:
+                messagebox.showwarning("Export", "A megadott szűrőkkel nem található találat!")
+                return
+
+            base = STATE_DIR
+            if fmt == "txt":
+                p = base / f"export_{int(time.time())}.txt"
+                with open(p, "w", encoding="utf-8") as f:
+                    for r in export_list:
+                        f.write(f"{r['url']} # {r['title']} [{r.get('lang','')} {r.get('category','')}]\n")
+            elif fmt == "csv":
+                p = base / f"export_{int(time.time())}.csv"
+                with open(p, "w", encoding="utf-8", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=["url", "title", "snippet", "fp", "ts", "lang", "category"])
+                    w.writeheader()
+                    for r in export_list:
+                        w.writerow({
                             "url": r["url"],
                             "title": r["title"],
                             "snippet": r.get("snippet", ""),
@@ -1271,22 +1648,21 @@ class MainWindow:
                             "ts": fmt_ts(r.get("ts")),
                             "lang": r.get("lang", ""),
                             "category": r.get("category", ""),
-                        }
-                    )
-        elif fmt == "json":
-            p = base / "export.json"
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(filtered, f, ensure_ascii=False, indent=2)
+                        })
+            elif fmt == "json":
+                p = base / f"export_{int(time.time())}.json"
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump(export_list, f, ensure_ascii=False, indent=2)
 
-        self.log_msg(
-            f"[EXPORT {fmt.upper()}] {p} ({len(filtered)} sor)",
-            force=True,
-            tag="save",
-        )
-        messagebox.showinfo("Export", f"Export kész: {p}\n{len(filtered)} sor")
-        self.set_statusbar_color(
-            "#2980b9", msg=f"Export {fmt.upper()} kész: {len(filtered)} sor"
-        )
+            win.destroy()
+            self.log_msg(f"[EXPORT {fmt.upper()}] Mentve: {p} ({len(export_list)} sor)", force=True, tag="save")
+            self.set_statusbar_color("#2980b9", msg=f"Export kész: {len(export_list)} sor ({p.name})")
+            messagebox.showinfo("Export kész", f"Sikeres exportálás:\n{p}\n\nÖsszesen: {len(export_list)} sor")
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=16, pady=10)
+        ttk.Button(btn_row, text="💾 Exportálás", command=_do_export).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=2)
 
     def fetch_github_thread(self):
         def _run():
@@ -1312,12 +1688,23 @@ class MainWindow:
                     "lang": "en",
                     "category": "other",
                 }
+            self.in_progress_urls.add(url)
 
-        page = self.fetcher.fetch_page(url, proxy_url)
+        # Fetch page with retry and rate-limiting
+        page = self.fetcher.fetch_page(
+            url, proxy_url, is_running_cb=lambda: self.running
+        )
         url_to_save = page.get("url", url)
+
+        # If interrupted during fetch, abort and leave out of checked_urls so it can resume!
+        if page.get("status") == "canceled" or not self.running:
+            with self.lock:
+                self.in_progress_urls.discard(url)
+            return {"url": url, "status": "canceled", "ts": now_ts}
 
         if page.get("status") == "dead":
             with self.lock:
+                self.in_progress_urls.discard(url)
                 self.dead_blacklist[url] = now_ts
                 self.pending_dead[url] = now_ts
                 if url not in self.checked_urls:
@@ -1328,6 +1715,7 @@ class MainWindow:
 
         if page.get("status") == "empty":
             with self.lock:
+                self.in_progress_urls.discard(url)
                 if url not in self.checked_urls:
                     self.checked_urls.add(url)
                     if url not in self.pending_checked:
@@ -1352,6 +1740,7 @@ class MainWindow:
             )
             if not ok:
                 with self.lock:
+                    self.in_progress_urls.discard(url)
                     if url not in self.checked_urls:
                         self.checked_urls.add(url)
                         if url not in self.pending_checked:
@@ -1366,37 +1755,49 @@ class MainWindow:
                     "category": category,
                 }
 
-        with self.lock:
-            if fp in self.seen_fp:
+        # Check for fingerprint clone
+        is_fp_duplicate, fp_orig = self.is_fp_seen(fp)
+        if is_fp_duplicate:
+            with self.lock:
+                self.in_progress_urls.discard(url)
                 if url not in self.checked_urls:
                     self.checked_urls.add(url)
                     if url not in self.pending_checked:
                         self.pending_checked.append(url)
-                return {
-                    "url": url_to_save,
-                    "status": "clone",
-                    "fp": fp,
-                    "ts": now_ts,
-                    "lang": lang,
-                    "category": category,
-                }
-            for b in btc:
-                if b in self.seen_btc:
+            return {
+                "url": url_to_save,
+                "status": "clone",
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+
+        # Check for Bitcoin address clone
+        for b in btc:
+            is_btc_duplicate, _ = self.is_btc_seen(b)
+            if is_btc_duplicate:
+                with self.lock:
+                    self.in_progress_urls.discard(url)
                     if url not in self.checked_urls:
                         self.checked_urls.add(url)
                         if url not in self.pending_checked:
                             self.pending_checked.append(url)
-                    return {
-                        "url": url_to_save,
-                        "status": "clone_btc",
-                        "ts": now_ts,
-                        "lang": lang,
-                        "category": category,
-                    }
-            self.seen_fp[fp] = url_to_save
+                return {
+                    "url": url_to_save,
+                    "status": "clone_btc",
+                    "ts": now_ts,
+                    "lang": lang,
+                    "category": category,
+                }
+
+        # Record unique site
+        with self.lock:
+            self.in_progress_urls.discard(url)
+            self._cache_fp(fp, url_to_save)
             self.pending_fp[fp] = url_to_save
             for b in btc:
-                self.seen_btc[b] = url_to_save
+                self._cache_btc(b, url_to_save)
                 self.pending_btc[b] = url_to_save
 
             result = {
@@ -1427,86 +1828,115 @@ class MainWindow:
         }
 
     def start_thread(self):
+        """Start fresh search from Ahmia queries + extra onions."""
         if self.running:
             return
         self.start_time = time.time()
         self.set_statusbar_color("#2980b9", msg="Keresés indítása...")
-        threading.Thread(target=self.run_search, daemon=True).start()
+        threading.Thread(target=lambda: self.run_search(resume_queue=False), daemon=True).start()
+
+    def resume_thread(self):
+        """Resume search directly from existing pending_queue."""
+        if self.running or not self.pending_queue:
+            return
+        self.start_time = time.time()
+        self.set_statusbar_color("#2980b9", msg=f"Keresés folytatása ({len(self.pending_queue)} URL)...")
+        threading.Thread(target=lambda: self.run_search(resume_queue=True), daemon=True).start()
 
     def stop(self):
+        """Immediately flag stop and update UI without getting stuck."""
         self.running = False
-        self.set_statusbar_color("#e67e22", msg="Leállítás kérve...")
+        self.set_statusbar_color("#e67e22", msg="Leállítás folyamatban...")
         self.log_msg("[STOP] Leállítás kérve...", force=True, tag="tor_err")
 
-    def run_search(self):
-        import re
-
+    def run_search(self, resume_queue=False):
         self.running = True
         self.btn_start.config(state=tk.DISABLED)
+        self.btn_resume.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
         proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
 
-        raw_q = self.query_entry.get()
-        queries = []
-        current = ""
-        in_quote = False
-        for ch in raw_q:
-            if ch == '"':
-                in_quote = not in_quote
-                current += ch
-            elif ch == "," and not in_quote:
-                if current.strip():
-                    queries.append(current.strip())
-                current = ""
-            else:
-                current += ch
-        if current.strip():
-            queries.append(current.strip())
+        if resume_queue and self.pending_queue:
+            new_urls = [u for u in self.pending_queue if u not in self.checked_urls and u not in self.dead_blacklist]
+            all_onions_count = len(new_urls) + len(self.checked_urls)
+            self.log_msg(f"[RESUME] Folytatás {len(new_urls)} hátralévő URL-lel", force=True, tag="start")
+        else:
+            raw_q = self.query_entry.get()
+            queries = []
+            current = ""
+            in_quote = False
+            for ch in raw_q:
+                if ch == '"':
+                    in_quote = not in_quote
+                    current += ch
+                elif ch == "," and not in_quote:
+                    if current.strip():
+                        queries.append(current.strip())
+                    current = ""
+                else:
+                    current += ch
+            if current.strip():
+                queries.append(current.strip())
 
-        extra_raw = self.extra_text.get("1.0", tk.END)
-        extra = set(
-            re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", extra_raw)
-        )
-        extra.update(
-            [f"http://{m}" for m in re.findall(r"[a-z2-7]{56}\.onion", extra_raw)]
-        )
-        all_onions = set(extra)
+            extra_raw = self.extra_text.get("1.0", tk.END)
+            extra = set(
+                re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", extra_raw)
+            )
+            extra.update(
+                [f"http://{m}" for m in re.findall(r"[a-z2-7]{56}\.onion", extra_raw)]
+            )
+            all_onions = set(extra)
 
-        ahmia_onions = self.fetcher.search_ahmia(
-            queries, is_running_cb=lambda: self.running
-        )
-        all_onions.update(ahmia_onions)
+            ahmia_onions = self.fetcher.search_ahmia(
+                queries, is_running_cb=lambda: self.running
+            )
+            all_onions.update(ahmia_onions)
 
-        new_urls = [
-            u
-            for u in all_onions
-            if u not in self.checked_urls and u not in self.dead_blacklist
-        ]
+            new_urls = [
+                u
+                for u in all_onions
+                if u not in self.checked_urls and u not in self.dead_blacklist
+            ]
+            all_onions_count = len(all_onions)
+            self.log_msg(
+                f"[START {self.backend_var.get()}] {len(all_onions)} összes, "
+                f"{len(self.checked_urls)} ellenőrizve, {len(new_urls)} új, {self.worker_var.get()} worker",
+                force=True,
+                tag="start",
+            )
+
         total = len(new_urls)
-        self.log_msg(
-            f"[START {self.backend_var.get()}] {len(all_onions)} összes, "
-            f"{len(self.checked_urls)} ellenőrizve, {total} új, {self.worker_var.get()} worker",
-            force=True,
-            tag="start",
-        )
-        self.progress.config(maximum=total if total else 1)
         with self.lock:
-            self.stats["total"] = len(all_onions)
+            self.stats["total"] = all_onions_count
+            self.pending_queue = list(new_urls)
+
+        self.progress.config(maximum=total if total else 1, value=0)
+        self.lbl_total.config(text=f"{all_onions_count}")
 
         workers = self.worker_var.get()
+        completed = 0
+
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(self.fetch_one, url, proxy): url
                 for url in new_urls
             }
-            completed = 0
             for fut in as_completed(futures):
+                url_finished = futures.get(fut)
                 if not self.running:
                     for f in futures:
                         f.cancel()
                     break
+
                 res = fut.result()
+                if res.get("status") == "canceled":
+                    continue
+
                 completed += 1
+                with self.lock:
+                    if url_finished in self.pending_queue:
+                        self.pending_queue.remove(url_finished)
+
                 is_success = res["status"] in ("unique", "clone", "clone_btc")
                 with self.lock:
                     if res["status"] == "unique":
@@ -1520,6 +1950,7 @@ class MainWindow:
                         self.stats["filtered"] = (
                             self.stats.get("filtered", 0) + 1
                         )
+
                 self.check_auto_newnym(is_success=is_success)
 
                 def _update(res=res, comp=completed):
@@ -1594,15 +2025,38 @@ class MainWindow:
 
                 self.root.after(0, _update)
 
+        # Handle clean completion or interrupted state
+        with self.lock:
+            self.in_progress_urls.clear()
+            self.stats["total"] = all_onions_count
+
         self.save_state(silent=False)
         self.save_deadlist()
-        self.set_statusbar_color(
-            "#27ae60",
-            msg=f"Kész! {len(self.results)} egyedi | NEWNYM: {self.total_newnym}",
-        )
+
+        def _finish_ui():
+            self.lbl_total.config(text=f"{all_onions_count}")
+            self.lbl_checked.config(text=f"{len(self.checked_urls)}")
+            self.btn_start.config(state=tk.NORMAL)
+            self.btn_stop.config(state=tk.DISABLED)
+            if self.pending_queue:
+                self.btn_resume.config(state=tk.NORMAL)
+            else:
+                self.btn_resume.config(state=tk.DISABLED)
+
+            if not self.running:
+                self.set_statusbar_color(
+                    "#e67e22",
+                    msg=f"Leállítva — {completed}/{total} feldolgozva | {len(self.pending_queue)} vár folytatásra",
+                )
+                self.lbl_speed.config(text=f"Leállítva: {completed}/{total}")
+            else:
+                self.set_statusbar_color(
+                    "#27ae60",
+                    msg=f"Kész! {len(self.results)} egyedi | NEWNYM: {self.total_newnym}",
+                )
+
+        self.root.after(0, _finish_ui)
         self.running = False
-        self.btn_start.config(state=tk.NORMAL)
-        self.btn_stop.config(state=tk.DISABLED)
 
 
 # Alias for backward compatibility

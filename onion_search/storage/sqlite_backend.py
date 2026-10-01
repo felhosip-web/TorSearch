@@ -42,8 +42,56 @@ class SQLiteBackend:
         cur.execute("CREATE TABLE IF NOT EXISTS checked (url TEXT PRIMARY KEY, ts REAL)")
         cur.execute("CREATE TABLE IF NOT EXISTS dead (url TEXT PRIMARY KEY, ts REAL)")
         cur.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+
+        # Secondary indexes for fast lookups
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_results_ts ON results(ts DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_checked_url ON checked(url)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_dead_ts ON dead(ts)")
+
         con.commit()
         con.close()
+
+    def get_fingerprint_url(self, fp):
+        """Query database directly for an existing duplicate content fingerprint."""
+        if not self.db_file.exists():
+            return None
+        try:
+            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+            cur = con.cursor()
+            cur.execute("SELECT url FROM fingerprints WHERE fp = ? LIMIT 1", (fp,))
+            row = cur.fetchone()
+            con.close()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    def get_btc_url(self, btc):
+        """Query database directly for an existing Bitcoin address mapping."""
+        if not self.db_file.exists():
+            return None
+        try:
+            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+            cur = con.cursor()
+            cur.execute("SELECT url FROM btc_map WHERE btc = ? LIMIT 1", (btc,))
+            row = cur.fetchone()
+            con.close()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    def is_url_checked(self, url):
+        """Check if URL was already checked previously in the database."""
+        if not self.db_file.exists():
+            return False
+        try:
+            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+            cur = con.cursor()
+            cur.execute("SELECT 1 FROM checked WHERE url = ? LIMIT 1", (url,))
+            row = cur.fetchone()
+            con.close()
+            return bool(row)
+        except Exception:
+            return False
 
     def load(self):
         if not self.db_file.exists():
@@ -91,6 +139,7 @@ class SQLiteBackend:
                 "success_count": int(meta.get("success_count", 0) or 0),
                 "total_count": int(meta.get("total_count", 0) or 0),
                 "total_newnym": int(meta.get("total_newnym", 0) or 0),
+                "pending_queue": meta.get("pending_queue", []),
             }
         except Exception as e:
             con.close()
@@ -132,6 +181,7 @@ class SQLiteBackend:
             "success_count": str(data.get("success_count", 0)),
             "total_count": str(data.get("total_count", 0)),
             "total_newnym": str(data.get("total_newnym", 0)),
+            "pending_queue": json.dumps(data.get("pending_queue", [])),
         }
         for k, v in meta_items.items():
             cur.execute("INSERT OR REPLACE INTO meta (key,value) VALUES (?,?)", (k, v))

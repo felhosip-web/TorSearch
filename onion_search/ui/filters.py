@@ -62,7 +62,7 @@ def matches_precise_filter(
 
 
 class FilterPanel(ttk.Frame):
-    """Encapsulates filter UI controls (quick language/category and precise keywords)."""
+    """Encapsulates filter UI controls (quick language/category and precise keywords) with live filtering."""
 
     def __init__(self, parent, on_filter_changed=None):
         super().__init__(parent)
@@ -79,8 +79,10 @@ class FilterPanel(ttk.Frame):
         self.regex_var = tk.StringVar(value="")
         self.min_len_var = tk.IntVar(value=0)
         self.save_only_filtered_var = tk.BooleanVar(value=True)
+        self.live_filter_var = tk.BooleanVar(value=True)
 
         self._build_ui()
+        self._setup_traces()
 
     def _build_ui(self):
         # 1. Precise filter frame
@@ -121,7 +123,10 @@ class FilterPanel(ttk.Frame):
         ).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(
             row2, text="Csak szűrt mentése", variable=self.save_only_filtered_var
-        ).pack(side=tk.LEFT, padx=6)
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(
+            row2, text="⚡ Élő szűrés", variable=self.live_filter_var
+        ).pack(side=tk.LEFT, padx=4)
         ttk.Button(row2, text="Szűrés Ctrl+F", command=self._trigger_change).pack(
             side=tk.LEFT, padx=4
         )
@@ -169,6 +174,26 @@ class FilterPanel(ttk.Frame):
             font=("TkDefaultFont", 8, "bold"),
         )
         self.lbl_filter_info.pack(side=tk.LEFT, padx=8)
+
+    def _setup_traces(self):
+        """Bind variable traces for instant live filtering."""
+        def _on_var_change(*args):
+            if self.live_filter_var.get():
+                self._trigger_change()
+
+        for var in [
+            self.must_all_var,
+            self.must_any_var,
+            self.must_not_var,
+            self.title_contains_var,
+            self.regex_var,
+            self.min_len_var,
+            self.enable_precise_var,
+        ]:
+            try:
+                var.trace_add("write", _on_var_change)
+            except Exception:
+                pass
 
     def _trigger_change(self):
         if self.on_filter_changed:

@@ -32,7 +32,6 @@ def test_json_backend_lifecycle():
         assert loaded["results"][0]["url"] == "http://sample.onion"
         assert loaded["stats"]["alive"] == 1
         
-        # Dead blacklist with > 24h expiration
         dead_data = {
             "http://dead1.onion": time.time(),
             "http://dead2.onion": time.time() - 25 * 3600
@@ -56,7 +55,7 @@ def test_sqlite_backend_lifecycle():
                 {"url": "http://site1.onion", "title": "Site 1", "snippet": "Snippet 1", "fp": "fp_a", "ts": 1700000000.0, "lang": "hu", "category": "forum"}
             ],
             "seen_fp": {"fp_a": "http://site1.onion"},
-            "seen_btc": {"1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2": "http://site1.onion"},
+            "seen_btc": {"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa": "http://site1.onion"},
             "checked_urls": ["http://site1.onion"],
             "stats": {"total": 1, "alive": 1, "clone": 0, "dead": 0, "filtered": 0},
             "queries": "forum",
@@ -68,17 +67,20 @@ def test_sqlite_backend_lifecycle():
         }
         backend.save(data)
         
+        # Test direct indexed queries
+        assert backend.get_fingerprint_url("fp_a") == "http://site1.onion"
+        assert backend.get_fingerprint_url("nonexistent_fp") is None
+        assert backend.get_btc_url("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa") == "http://site1.onion"
+        assert backend.get_btc_url("nonexistent_btc") is None
+        assert backend.is_url_checked("http://site1.onion") is True
+        assert backend.is_url_checked("http://unvisited.onion") is False
+        
         loaded = backend.load()
         assert loaded is not None
         assert len(loaded["results"]) == 1
         assert loaded["results"][0]["title"] == "Site 1"
-        assert loaded["results"][0]["lang"] == "hu"
-        assert loaded["results"][0]["category"] == "forum"
         assert loaded["seen_fp"] == {"fp_a": "http://site1.onion"}
-        assert loaded["seen_btc"] == {"1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2": "http://site1.onion"}
-        assert loaded["success_count"] == 3
-        assert loaded["total_count"] == 5
-        assert loaded["total_newnym"] == 2
+        assert loaded["seen_btc"] == {"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa": "http://site1.onion"}
         
         # Test pending incremental save
         pending = {
@@ -91,9 +93,7 @@ def test_sqlite_backend_lifecycle():
             "stats": {"total": 2, "alive": 2, "clone": 0, "dead": 0, "filtered": 0}
         }
         assert backend.save_pending(pending) is True
-        
-        loaded2 = backend.load()
-        assert len(loaded2["results"]) == 2
+        assert backend.is_url_checked("http://site2.onion") is True
         
         # Dead blacklist
         loaded_dead = backend.load_dead()

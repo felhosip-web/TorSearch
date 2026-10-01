@@ -1,10 +1,14 @@
 """
-Network operations, session management, and onion fetching.
+Network operations, session management, domain rate-limiting, and retry logic.
 """
+from datetime import datetime
+from pathlib import Path
 import random
 import re
 import threading
 import time
+from urllib.parse import urlparse
+import urllib.robotparser
 from bs4 import BeautifulSoup
 import requests
 from onion_search.core.detector import (
@@ -61,6 +65,70 @@ def close_all_thread_sessions():
         pass
 
 
+class DomainRateLimiter:
+    """Thread-safe per-domain rate limiter to avoid overwhelming .onion services."""
+
+    def __init__(self, min_domain_delay=1.0):
+        self.min_domain_delay = min_domain_delay
+        self.last_domain_request = {}
+        self.lock = threading.Lock()
+
+    def wait_for_domain(self, domain):
+        """Wait if needed to ensure at least min_domain_delay has passed since last request to domain."""
+        if not domain or self.min_domain_delay <= 0:
+            return
+
+        with self.lock:
+            now = time.time()
+            last_time = self.last_domain_request.get(domain, 0)
+            wait_time = (last_time + self.min_domain_delay) - now
+            if wait_time > 0:
+                self.last_domain_request[domain] = now + wait_time
+            else:
+                self.last_domain_request[domain] = now
+
+        if wait_time > 0:
+            time.sleep(min(wait_time, 5.0))
+
+
+class RobotsChecker:
+    """Optional robots.txt parser and domain policy cache."""
+
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+        self.cache = {}
+        self.lock = threading.Lock()
+
+    def is_allowed(self, url, sess):
+        if not self.enabled:
+            return True
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        if not domain:
+            return True
+
+        with self.lock:
+            if domain in self.cache:
+                rp = self.cache[domain]
+                return rp.can_fetch("*", url) if rp else True
+
+        # Fetch robots.txt
+        robots_url = f"{parsed.scheme}://{domain}/robots.txt"
+        rp = None
+        try:
+            resp = sess.get(robots_url, timeout=8)
+            if resp.status_code == 200:
+                rp = urllib.robotparser.RobotFileParser()
+                rp.parse(resp.text.splitlines())
+        except Exception:
+            rp = None
+
+        with self.lock:
+            self.cache[domain] = rp
+
+        return rp.can_fetch("*", url) if rp else True
+
+
 class SessionManager:
     """Manages thread-local requests sessions for Tor routing."""
 
@@ -72,11 +140,24 @@ class SessionManager:
 
 
 class OnionFetcher:
-    """Handles network fetching from public directories, seed lists, and onion services."""
+    """
+    Handles network fetching with retry logic, exponential backoff,
+    domain rate-limiting, and optional robots.txt compliance.
+    """
 
-    def __init__(self, session_manager=None, detector=None):
+    def __init__(
+        self,
+        session_manager=None,
+        detector=None,
+        max_retries=2,
+        domain_delay=1.0,
+        respect_robots=False,
+    ):
         self.session_manager = session_manager or SessionManager()
         self.detector = detector or ContentDetector()
+        self.max_retries = max_retries
+        self.rate_limiter = DomainRateLimiter(min_domain_delay=domain_delay)
+        self.robots_checker = RobotsChecker(enabled=respect_robots)
 
     def fetch_github_seeds(self):
         """Fetch discovered .onion addresses from public GitHub and Ahmia lists."""
@@ -128,38 +209,118 @@ class OnionFetcher:
                 pass
         return all_onions
 
-    def fetch_page(self, url, proxy_url):
-        """Fetch a single onion URL through Tor SOCKS proxy and parse structure."""
+    def fetch_page(self, url, proxy_url, is_running_cb=None):
+        """
+        Fetch a single onion URL through Tor SOCKS proxy with:
+        - Domain rate limiting
+        - Exponential backoff retry on transient errors (timeouts, 429, 503)
+        - Robots.txt checking
+        """
         now_ts = time.time()
+        domain = urlparse(url).netloc
         sess = self.session_manager.get_session(proxy_url)
-        if random.random() < 0.3:
-            sess.headers.update(random.choice(HEADERS_LIST))
-        try:
-            r = sess.get(url, timeout=TIMEOUT_GET, allow_redirects=True)
-            final_url = r.url
-            if r.status_code != 200 or len(r.text) < 300:
-                return {
-                    "url": final_url if ".onion" in final_url else url,
-                    "status": "dead",
-                    "code": r.status_code,
-                    "ts": now_ts,
-                    "lang": "en",
-                    "category": "other",
-                }
-            html = r.text
-            url_to_save = final_url if ".onion" in final_url else url
-        except Exception as e:
+
+        if not self.robots_checker.is_allowed(url, sess):
             return {
                 "url": url,
-                "status": "dead",
-                "err": str(e)[:100],
+                "status": "filtered",
+                "reason": "robots.txt disallowed",
                 "ts": now_ts,
                 "lang": "en",
                 "category": "other",
             }
 
+        last_error = None
+        last_code = None
+        final_url = url
+        html = None
+
+        # Retry loop with exponential backoff (e.g. 1s, 2s)
+        for attempt in range(self.max_retries + 1):
+            if is_running_cb and not is_running_cb():
+                return {
+                    "url": url,
+                    "status": "canceled",
+                    "ts": now_ts,
+                    "lang": "en",
+                    "category": "other",
+                }
+
+            # Enforce per-domain rate limit
+            self.rate_limiter.wait_for_domain(domain)
+
+            if random.random() < 0.3:
+                sess.headers.update(random.choice(HEADERS_LIST))
+
+            try:
+                r = sess.get(url, timeout=TIMEOUT_GET, allow_redirects=True)
+                final_url = r.url
+                last_code = r.status_code
+
+                # Rate limited or temporary overload -> backoff and retry
+                if r.status_code in (429, 503) and attempt < self.max_retries:
+                    backoff = (2**attempt) * 1.5
+                    time.sleep(backoff)
+                    continue
+
+                if r.status_code != 200 or len(r.text) < 300:
+                    # If failed on attempt < max_retries on transient 5xx, retry
+                    if r.status_code in (500, 502, 504) and attempt < self.max_retries:
+                        backoff = 2**attempt
+                        time.sleep(backoff)
+                        continue
+
+                    return {
+                        "url": final_url if ".onion" in final_url else url,
+                        "status": "dead",
+                        "code": r.status_code,
+                        "ts": now_ts,
+                        "lang": "en",
+                        "category": "other",
+                    }
+
+                html = r.text
+                break  # Successful fetch!
+
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, Exception) as e:
+                last_error = str(e)[:100]
+                if attempt < self.max_retries:
+                    # Exponential backoff before next attempt
+                    backoff = 2**attempt
+                    time.sleep(backoff)
+                    continue
+                else:
+                    return {
+                        "url": url,
+                        "status": "dead",
+                        "err": last_error,
+                        "ts": now_ts,
+                        "lang": "en",
+                        "category": "other",
+                    }
+
+        if html is None:
+            return {
+                "url": url,
+                "status": "dead",
+                "err": last_error or f"HTTP {last_code}",
+                "ts": now_ts,
+                "lang": "en",
+                "category": "other",
+            }
+
+        url_to_save = final_url if ".onion" in final_url else url
         soup = BeautifulSoup(html, "html.parser")
         html_lang = soup.html.get("lang", "") if soup.html else ""
+
+        # Extract title before stripping tags
+        title_tmp = (
+            soup.title.string.strip()[:70]
+            if soup.title and soup.title.string
+            else "Nincs cím"
+        )
+
+        # Decompose non-content elements
         for s in soup(["script", "style", "nav", "footer"]):
             s.decompose()
         text = re.sub(r"\s+", " ", soup.get_text()).lower().strip()[:8000]
@@ -176,12 +337,7 @@ class OnionFetcher:
         fp = self.detector.extract_fingerprint(text)
         btc = self.detector.extract_bitcoin_addresses(text)
         lang = self.detector.detect_language(text, html_lang)
-        title_tmp = (
-            soup.title.string.strip()[:70]
-            if soup.title and soup.title.string
-            else "Nincs cím"
-        )
-        category = self.detector.detect_category(title_tmp, text)
+        category = self.detector.detect_category(title_tmp, text, soup=soup)
 
         return {
             "url": url_to_save,

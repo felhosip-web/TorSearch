@@ -1958,7 +1958,11 @@ class MainWindow:
             ahmia_onions = self.fetcher.search_ahmia(
                 queries, is_running_cb=lambda: self.running
             )
+            ose_onions = self.fetcher.search_onionsearchengine(
+                queries, is_running_cb=lambda: self.running
+            )
             all_onions.update(ahmia_onions)
+            all_onions.update(ose_onions)
 
             new_urls = [
                 u

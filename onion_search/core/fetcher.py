@@ -237,6 +237,29 @@ class OnionFetcher:
                 pass
         return all_onions
 
+    def search_onionsearchengine(self, queries, is_running_cb=None):
+        """Query OnionSearchEngine for keywords and extract .onion links."""
+        all_onions = set()
+        for q in queries:
+            if is_running_cb and not is_running_cb():
+                break
+            try:
+                r = requests.get(
+                    f"https://onionsearchengine.com/search.php?search={requests.utils.quote(q)}",
+                    timeout=15,
+                    headers=random.choice(HEADERS_LIST),
+                )
+                soup = BeautifulSoup(r.text, HTML_PARSER)
+                for a in soup.find_all("a", href=True):
+                    h = a["href"]
+                    if ".onion" in h:
+                        h = h.split("?")[0].split("#")[0]
+                        if len(h) > 20:
+                            all_onions.add(h)
+            except Exception:
+                pass
+        return all_onions
+
     def parse_html_content(self, html, final_url, url, now_ts):
         """Fast HTML parsing and feature extraction using lxml and fingerprint caching."""
         soup = BeautifulSoup(html, HTML_PARSER)

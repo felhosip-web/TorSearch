@@ -43,9 +43,32 @@ export default function App() {
     },
     {
       title: 'Átfogó Unit Tesztkészlet (52/52 Sikeres Teszt)',
-      desc: 'Részletes egységtesztek a detect_language (nyelvek & HTML attr), detect_category (súlyok & DOM), matches_precise_filter (AND/OR/NOT/Regex) és parse_list függvényekre.',
       icon: ShieldCheck,
       color: 'text-purple-400',
+    },
+    {
+      title: 'Aszinkron Motor (aiohttp + asyncio)',
+      desc: 'A korábbi httpx alapú fetcher helyett egy rendkívül gyors aiohttp.ClientSession alapú aszinkron motor végzi a letöltéseket az async_fetch_page metóduson keresztül.',
+      icon: Zap,
+      color: 'text-yellow-400',
+    },
+    {
+      title: 'Több Keresőmotor (Ahmia + OnionSearchEngine)',
+      desc: 'A beépített Ahmia mellett immár az OnionSearchEngine is aktívan részt vesz a találatok biztosításában, jelentősen növelve az új felfedezett .onion címek számát.',
+      icon: FolderTree,
+      color: 'text-emerald-400',
+    },
+    {
+      title: 'Szálbiztosság & X11 Hibajavítások',
+      desc: 'A UI elemek és változók lekérdezése (get/config) áthelyezésre került a főszálba, megszüntetve a Linuxos X11 async összeomlásokat és beragadó kereséseket.',
+      icon: ShieldCheck,
+      color: 'text-red-400',
+    },
+    {
+      title: 'Tor Circuit Info Logolás',
+      desc: 'A NEWNYM parancsok kiadásakor a vezérlő automatikusan lekéri az aktív Tor áramkörök adatait (circuit-status) és naplózza a felületen.',
+      icon: Terminal,
+      color: 'text-blue-400',
     },
   ];
 

@@ -12,7 +12,7 @@ import time
 from urllib.parse import urlparse
 import urllib.robotparser
 from bs4 import BeautifulSoup
-import httpx
+import aiohttp
 import requests
 
 from onion_search.core.detector import (
@@ -379,7 +379,7 @@ class OnionFetcher:
 
     async def async_fetch_page(self, client, url, is_running_cb=None):
         """
-        Asynchronous fetch using shared httpx.AsyncClient connection pool.
+        Asynchronous fetch using shared aiohttp.ClientSession connection pool.
         Eliminates per-thread socket opening, achieving 10-50x concurrency efficiency.
         """
         now_ts = time.time()
@@ -414,34 +414,35 @@ class OnionFetcher:
 
             headers = random.choice(HEADERS_LIST)
             try:
-                r = await client.get(url, timeout=TIMEOUT_GET, follow_redirects=True, headers=headers)
-                final_url = str(r.url)
-                last_code = r.status_code
+                async with client.get(url, timeout=TIMEOUT_GET, allow_redirects=True, headers=headers) as r:
+                    final_url = str(r.url)
+                    last_code = r.status
+                    text = await r.text()
 
-                if r.status_code in (429, 503) and attempt < self.max_retries:
-                    backoff = (2**attempt) * 1.5
-                    await asyncio.sleep(backoff)
-                    continue
-
-                if r.status_code != 200 or len(r.text) < 300:
-                    if r.status_code in (500, 502, 504) and attempt < self.max_retries:
-                        backoff = 2**attempt
+                    if r.status in (429, 503) and attempt < self.max_retries:
+                        backoff = (2**attempt) * 1.5
                         await asyncio.sleep(backoff)
                         continue
 
-                    return {
-                        "url": final_url if ".onion" in final_url else url,
-                        "status": "dead",
-                        "code": r.status_code,
-                        "ts": now_ts,
-                        "lang": "en",
-                        "category": "other",
-                    }
+                    if r.status != 200 or len(text) < 300:
+                        if r.status in (500, 502, 504) and attempt < self.max_retries:
+                            backoff = 2**attempt
+                            await asyncio.sleep(backoff)
+                            continue
 
-                html = r.text
-                break
+                        return {
+                            "url": final_url if ".onion" in final_url else url,
+                            "status": "dead",
+                            "code": r.status,
+                            "ts": now_ts,
+                            "lang": "en",
+                            "category": "other",
+                        }
 
-            except (httpx.TimeoutException, httpx.NetworkError, Exception) as e:
+                    html = text
+                    break
+
+            except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
                 last_error = str(e)[:100]
                 if attempt < self.max_retries:
                     backoff = 2**attempt
@@ -469,3 +470,4 @@ class OnionFetcher:
 
         url_to_save = final_url if ".onion" in final_url else url
         return self.parse_html_content(html, url_to_save, url, now_ts)
+

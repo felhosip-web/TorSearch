@@ -90,6 +90,71 @@ def send_newnym_via_control(control_port=9051, password=None):
     return False, f"ControlPort nem elerheto {ports_to_try} - {last_err}"
 
 
+def get_tor_circuit_status(control_port=9051, password=None):
+    """Retrieve Tor circuit status via control port."""
+    ports_to_try = [control_port]
+    if control_port == 9051:
+        ports_to_try.append(9151)
+    else:
+        ports_to_try.append(9051)
+    cookie_file = find_tor_cookie()
+    last_err = "ismeretlen"
+    for port in ports_to_try:
+        try:
+            from stem.control import Controller
+            with Controller.from_port(port=port) as c:
+                try:
+                    c.authenticate()
+                    info = c.get_info("circuit-status")
+                    return True, info
+                except Exception:
+                    try:
+                        c.authenticate(password="")
+                        info = c.get_info("circuit-status")
+                        return True, info
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            s = socket.socket()
+            s.settimeout(4)
+            s.connect(("127.0.0.1", port))
+            s.sendall(b'AUTHENTICATE ""\r\n')
+            resp = s.recv(2048).decode()
+            if "515" in resp and cookie_file:
+                try:
+                    cookie_data = cookie_file.read_bytes().hex()
+                    s.sendall(f"AUTHENTICATE {cookie_data}\r\n".encode())
+                    resp = s.recv(2048).decode()
+                except Exception:
+                    pass
+            s.sendall(b"GETINFO circuit-status\r\n")
+            
+            resp2 = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp2 += chunk
+                if b"250 OK" in resp2:
+                    break
+            
+            s.close()
+            resp2_text = resp2.decode()
+            if "250-circuit-status=" in resp2_text or "250+circuit-status=" in resp2_text:
+                info_parts = resp2_text.split("circuit-status=", 1)
+                if len(info_parts) > 1:
+                    info = info_parts[1].split("250 OK")[0].strip()
+                    return True, info
+            elif "250 OK" in resp2_text:
+                return True, ""
+        except Exception as e:
+            last_err = e
+            continue
+    return False, f"Nem sikerult lekerdezni a circuit-statust: {last_err}"
+
+
 def check_tor_socks(proxy_port):
     """Verify SOCKS proxy connectivity against check.torproject.org."""
     try:
@@ -180,5 +245,8 @@ class TorController:
         if ok:
             self.last_newnym = now
             time.sleep(4)
+            c_ok, c_info = get_tor_circuit_status(control_port=int(control_port))
+            if c_ok and c_info:
+                msg += f"\n[TOR] Circuit status:\n{c_info}"
             return True, msg
         return False, msg

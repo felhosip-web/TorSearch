@@ -1292,7 +1292,7 @@ class MainWindow:
             target=lambda: self.do_newnym(reason="manual"), daemon=True
         ).start()
 
-    def check_auto_newnym(self, is_success: bool = False) -> None:
+    def check_auto_newnym(self, is_success: bool = False, auto_newnym_success: bool = False, auto_newnym_total: bool = False) -> None:
         with self.lock:
             self.total_count += 1
             if is_success:
@@ -1307,12 +1307,12 @@ class MainWindow:
         now = time.time()
         should_trigger = False
         reason = ""
-        if self.auto_newnym_success_var.get() and sc >= n_s:
+        if auto_newnym_success and sc >= n_s:
             should_trigger = True
             reason = f"auto sikeres {sc}/{n_s}"
         if (
             not should_trigger
-            and self.auto_newnym_total_var.get()
+            and auto_newnym_total
             and tc >= n_t
         ):
             should_trigger = True
@@ -1870,7 +1870,25 @@ class MainWindow:
             return
         self.start_time = time.time()
         self.set_statusbar_color("#2980b9", msg="Keresés indítása...")
-        threading.Thread(target=lambda: self.run_search(resume_queue=False), daemon=True).start()
+        
+        raw_q = self.query_entry.get()
+        extra_raw = self.extra_text.get("1.0", tk.END)
+        workers = self.worker_var.get()
+        backend = self.backend_var.get()
+        auto_save = self.auto_save_var.get()
+        port = self.port_var.get()
+        auto_newnym_success = self.auto_newnym_success_var.get()
+        auto_newnym_total = self.auto_newnym_total_var.get()
+        
+        self.btn_start.config(state=tk.DISABLED)
+        self.btn_resume.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.NORMAL)
+        
+        threading.Thread(target=lambda: self.run_search(
+            resume_queue=False, raw_q=raw_q, extra_raw=extra_raw, 
+            workers=workers, backend=backend, auto_save=auto_save, port=port,
+            auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total
+        ), daemon=True).start()
 
     def resume_thread(self) -> None:
         """Resume search directly from existing pending_queue."""
@@ -1878,7 +1896,25 @@ class MainWindow:
             return
         self.start_time = time.time()
         self.set_statusbar_color("#2980b9", msg=f"Keresés folytatása ({len(self.pending_queue)} URL)...")
-        threading.Thread(target=lambda: self.run_search(resume_queue=True), daemon=True).start()
+        
+        raw_q = self.query_entry.get()
+        extra_raw = self.extra_text.get("1.0", tk.END)
+        workers = self.worker_var.get()
+        backend = self.backend_var.get()
+        auto_save = self.auto_save_var.get()
+        port = self.port_var.get()
+        auto_newnym_success = self.auto_newnym_success_var.get()
+        auto_newnym_total = self.auto_newnym_total_var.get()
+        
+        self.btn_start.config(state=tk.DISABLED)
+        self.btn_resume.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.NORMAL)
+        
+        threading.Thread(target=lambda: self.run_search(
+            resume_queue=True, raw_q=raw_q, extra_raw=extra_raw, 
+            workers=workers, backend=backend, auto_save=auto_save, port=port,
+            auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total
+        ), daemon=True).start()
 
     def stop(self) -> None:
         """Immediately flag stop and update UI without getting stuck."""
@@ -1886,19 +1922,15 @@ class MainWindow:
         self.set_statusbar_color("#e67e22", msg="Leállítás folyamatban...")
         self.log_msg("[STOP] Leállítás kérve...", force=True, tag="tor_err")
 
-    def run_search(self, resume_queue: bool = False) -> None:
+    def run_search(self, resume_queue: bool = False, raw_q: str = "", extra_raw: str = "", workers: int = 10, backend: str = "JSON", auto_save: bool = True, port: str = "9050", auto_newnym_success: bool = False, auto_newnym_total: bool = False) -> None:
         self.running = True
-        self.btn_start.config(state=tk.DISABLED)
-        self.btn_resume.config(state=tk.DISABLED)
-        self.btn_stop.config(state=tk.NORMAL)
-        proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
+        proxy = f"socks5h://127.0.0.1:{port}"
 
         if resume_queue and self.pending_queue:
             new_urls = [u for u in self.pending_queue if u not in self.checked_urls and u not in self.dead_blacklist]
             all_onions_count = len(new_urls) + len(self.checked_urls)
             self.log_msg(f"[RESUME] Folytatás {len(new_urls)} hátralévő URL-lel", force=True, tag="start")
         else:
-            raw_q = self.query_entry.get()
             queries = []
             current = ""
             in_quote = False
@@ -1915,7 +1947,6 @@ class MainWindow:
             if current.strip():
                 queries.append(current.strip())
 
-            extra_raw = self.extra_text.get("1.0", tk.END)
             extra = set(
                 re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", extra_raw)
             )
@@ -1936,8 +1967,8 @@ class MainWindow:
             ]
             all_onions_count = len(all_onions)
             self.log_msg(
-                f"[START {self.backend_var.get()}] {len(all_onions)} összes, "
-                f"{len(self.checked_urls)} ellenőrizve, {len(new_urls)} új, {self.worker_var.get()} worker",
+                f"[START {backend}] {len(all_onions)} összes, "
+                f"{len(self.checked_urls)} ellenőrizve, {len(new_urls)} új, {workers} worker",
                 force=True,
                 tag="start",
             )
@@ -1947,10 +1978,11 @@ class MainWindow:
             self.stats["total"] = all_onions_count
             self.pending_queue = list(new_urls)
 
-        self.progress.config(maximum=total if total else 1, value=0)
-        self.lbl_total.config(text=f"{all_onions_count}")
+        def _setup_ui():
+            self.progress.config(maximum=total if total else 1, value=0)
+            self.lbl_total.config(text=f"{all_onions_count}")
+        self.root.after(0, _setup_ui)
 
-        workers = self.worker_var.get()
         completed = 0
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1988,7 +2020,7 @@ class MainWindow:
                             self.stats.get("filtered", 0) + 1
                         )
 
-                self.check_auto_newnym(is_success=is_success)
+                self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
 
                 def _update(res=res, comp=completed):
                     pct = int(comp / total * 100) if total else 0
@@ -2057,7 +2089,7 @@ class MainWindow:
                                 f"[-] HALOTT: {res['url'][:60]} ({res.get('code','')})",
                                 tag="dead",
                             )
-                    if comp % 10 == 0 and self.auto_save_var.get():
+                    if comp % 10 == 0 and auto_save:
                         self.save_incremental_pending()
 
                 self.root.after(0, _update)

@@ -1,8 +1,11 @@
 """
 Content detection: language, category, fingerprint, and crypto address extraction.
+Includes LRU classification caching by fingerprint for high-throughput scraping.
 """
+from collections import OrderedDict
 import hashlib
 import re
+import threading
 from bs4 import BeautifulSoup
 
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -142,7 +145,7 @@ def detect_language(text, html_lang_attr=""):
     best = max(scores, key=scores.get)
     sorted_scores = sorted(scores.values(), reverse=True)
 
-    # If top heuristic has high confidence over second place, return immediately without slow library call
+    # If top heuristic has high confidence over second place, return immediately
     if sorted_scores[0] >= 5 and (sorted_scores[0] - sorted_scores[1] >= 3):
         return best
 
@@ -288,7 +291,42 @@ def extract_fingerprint(text):
 
 
 class ContentDetector:
-    """Class wrapper for content detection, supporting dependency injection."""
+    """Class wrapper for content detection with in-memory LRU classification caching."""
+
+    def __init__(self, max_cache_size=50000):
+        self.max_cache_size = max_cache_size
+        self.fp_cache = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get_cached_classification(self, fp):
+        """Retrieve cached (lang, category) tuple by content fingerprint."""
+        if not fp:
+            return None
+        with self.lock:
+            if fp in self.fp_cache:
+                self.fp_cache.move_to_end(fp)
+                return self.fp_cache[fp]
+        return None
+
+    def cache_classification(self, fp, lang, category):
+        """Store (lang, category) in LRU fingerprint cache."""
+        if not fp:
+            return
+        with self.lock:
+            self.fp_cache[fp] = (lang, category)
+            if len(self.fp_cache) > self.max_cache_size:
+                self.fp_cache.popitem(last=False)
+
+    def classify_with_cache(self, fp, title, text, html_lang="", soup=None):
+        """Classify content, using fingerprint cache to bypass repeat computation."""
+        cached = self.get_cached_classification(fp)
+        if cached:
+            return cached[0], cached[1]
+
+        lang = self.detect_language(text, html_lang)
+        category = self.detect_category(title, text, soup=soup)
+        self.cache_classification(fp, lang, category)
+        return lang, category
 
     def detect_language(self, text, html_lang_attr=""):
         return detect_language(text, html_lang_attr)

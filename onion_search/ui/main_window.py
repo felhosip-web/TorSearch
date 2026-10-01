@@ -1292,6 +1292,33 @@ class MainWindow:
     def save_deadlist(self):
         self.get_backend().save_dead(self.dead_blacklist)
 
+    def save_incremental_pending(self):
+        """Save only newly discovered pending delta items without rewriting the entire database."""
+        with self.lock:
+            if not self.pending_results and not self.pending_checked and not self.pending_dead:
+                return
+            pending = {
+                "results": list(self.pending_results),
+                "seen_fp": dict(self.pending_fp),
+                "seen_btc": dict(self.pending_btc),
+                "checked_urls": list(self.pending_checked),
+                "stats": dict(self.stats),
+            }
+            pending_dead = dict(self.pending_dead)
+            self.pending_results.clear()
+            self.pending_fp.clear()
+            self.pending_btc.clear()
+            self.pending_checked.clear()
+            self.pending_dead.clear()
+
+        try:
+            backend = self.get_backend()
+            backend.save_pending(pending)
+            if pending_dead and hasattr(backend, "save_dead_pending"):
+                backend.save_dead_pending(pending_dead)
+        except Exception as e:
+            self.log_msg(f"[SAVE INCREMENTAL HIBA] {e}", force=False, tag="error")
+
     def save_state(self, silent=False):
         try:
             backend = self.get_backend()
@@ -2021,7 +2048,7 @@ class MainWindow:
                                 tag="dead",
                             )
                     if comp % 10 == 0 and self.auto_save_var.get():
-                        self.save_state(silent=True)
+                        self.save_incremental_pending()
 
                 self.root.after(0, _update)
 

@@ -43,13 +43,30 @@ class SQLiteBackend:
         cur.execute("CREATE TABLE IF NOT EXISTS dead (url TEXT PRIMARY KEY, ts REAL)")
         cur.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
 
-        # Secondary indexes for fast lookups
+        # Secondary indexes for fast filtering and lookups
         cur.execute("CREATE INDEX IF NOT EXISTS idx_results_ts ON results(ts DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_results_lang ON results(lang)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_results_cat ON results(category)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_results_fp ON results(fp)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_checked_url ON checked(url)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_dead_ts ON dead(ts)")
 
         con.commit()
         con.close()
+
+    def get_classification_by_fp(self, fp):
+        """Query database for previously computed (lang, category) by content fingerprint."""
+        if not self.db_file.exists() or not fp:
+            return None
+        try:
+            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+            cur = con.cursor()
+            cur.execute("SELECT lang, category FROM results WHERE fp = ? LIMIT 1", (fp,))
+            row = cur.fetchone()
+            con.close()
+            return (row[0], row[1]) if row else None
+        except Exception:
+            return None
 
     def get_fingerprint_url(self, fp):
         """Query database directly for an existing duplicate content fingerprint."""

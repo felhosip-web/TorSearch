@@ -103,6 +103,8 @@ class MainWindow:
         self.success_threshold_var = tk.IntVar(value=cfg.success_threshold)
         self.total_threshold_var = tk.IntVar(value=cfg.total_threshold)
         self.auto_save_var = tk.BooleanVar(value=cfg.auto_save)
+        self.allow_clearnet_var = tk.BooleanVar(value=cfg.allow_clearnet)
+        self.encrypt_storage_var = tk.BooleanVar(value=cfg.encrypt_storage)
         self.status_var = tk.StringVar(value="Készen - v4.8 secure")
 
         # Build UI layout
@@ -118,15 +120,26 @@ class MainWindow:
         self.root.bind("<Control-s>", lambda e: self.save_state(silent=False))
         self.root.bind("<Control-n>", lambda e: self.manual_newnym_thread())
         self.root.bind("<Control-f>", lambda e: self.apply_filters())
+        self.root.bind("<Control-Shift-Delete>", lambda e: self.panic_wipe())
+        self.root.bind("<Control-Shift-KP_Delete>", lambda e: self.panic_wipe())
+        self.root.bind("<Control-Shift-BackSpace>", lambda e: self.panic_wipe())
+        self.root.bind("<Control-Delete>", lambda e: self.panic_wipe())
+        self.root.bind("<Control-KP_Delete>", lambda e: self.panic_wipe())
 
         threading.Thread(target=self.check_tor_on_startup, daemon=True).start()
 
     def get_backend(self) -> Any:
-        return (
+        backend = (
             self.sqlite_backend
             if self.backend_var.get() == "sqlite"
             else self.json_backend
         )
+        if hasattr(backend, "encrypt_storage"):
+            backend.encrypt_storage = self.encrypt_storage_var.get()
+            if backend.encrypt_storage and getattr(backend, "encryptor", None) is None:
+                from onion_search.storage.crypto import StorageEncryptor
+                backend.encryptor = StorageEncryptor()
+        return backend
 
     def _cache_fp(self, fp: str, url: str) -> None:
         self.seen_fp[fp] = url
@@ -343,6 +356,8 @@ class MainWindow:
                 total_threshold=self.total_threshold_var.get(),
                 auto_save=self.auto_save_var.get(),
                 live_filtering=self.filters_panel.live_filter_var.get(),
+                allow_clearnet=self.allow_clearnet_var.get(),
+                encrypt_storage=self.encrypt_storage_var.get(),
                 queries=self.query_entry.get(),
             )
             self.config_manager.save(cfg)
@@ -356,34 +371,34 @@ class MainWindow:
         top = ttk.Frame(self.root, padding=8)
         top.pack(fill=tk.X)
         ttk.Label(top, text="Ahmia szavak:").pack(side=tk.LEFT)
-        self.query_entry = ttk.Entry(top, width=20)
+        self.query_entry = ttk.Entry(top, width=18)
         self.query_entry.insert(0, cfg.queries)
-        self.query_entry.pack(side=tk.LEFT, padx=4)
+        self.query_entry.pack(side=tk.LEFT, padx=3)
 
-        ttk.Label(top, text="Tor:").pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(top, text="Tor:").pack(side=tk.LEFT, padx=(4, 0))
         self.port_var = tk.StringVar(value=cfg.socks_port)
         ttk.Combobox(
             top, textvariable=self.port_var, values=["9050", "9150"], width=5
         ).pack(side=tk.LEFT)
 
-        ttk.Label(top, text="Ctrl:").pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(top, text="Ctrl:").pack(side=tk.LEFT, padx=(4, 0))
         self.ctrl_port_var = tk.StringVar(value=cfg.ctrl_port)
         ttk.Combobox(
             top, textvariable=self.ctrl_port_var, values=["9051", "9151"], width=5
         ).pack(side=tk.LEFT)
 
-        ttk.Label(top, text="Workers:").pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(top, text="Workers:").pack(side=tk.LEFT, padx=(4, 0))
         self.worker_var = tk.IntVar(value=cfg.workers)
         ttk.Spinbox(
-            top, from_=2, to=10, textvariable=self.worker_var, width=4
+            top, from_=2, to=10, textvariable=self.worker_var, width=3
         ).pack(side=tk.LEFT)
 
-        ttk.Label(top, text="Backend:").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(top, text="Backend:").pack(side=tk.LEFT, padx=(6, 0))
         self.backend_combo = ttk.Combobox(
             top,
             textvariable=self.backend_var,
             values=["sqlite", "json"],
-            width=7,
+            width=6,
             state="readonly",
         )
         self.backend_combo.pack(side=tk.LEFT)
@@ -391,12 +406,23 @@ class MainWindow:
             "<<ComboboxSelected>>", lambda e: self.on_backend_switch()
         )
 
+        ttk.Checkbutton(top, text="Clearnet", variable=self.allow_clearnet_var).pack(
+            side=tk.LEFT, padx=3
+        )
+        ttk.Checkbutton(top, text="Titkosítva", variable=self.encrypt_storage_var).pack(
+            side=tk.LEFT, padx=3
+        )
+
         persist = ttk.Frame(top)
         persist.pack(side=tk.RIGHT)
+        self.btn_panic = ttk.Button(
+            persist, text="🚨 PÁNIK (Ctrl+Shift+Del)", command=self.panic_wipe
+        )
+        self.btn_panic.pack(side=tk.LEFT, padx=3)
         self.btn_theme = ttk.Button(
             persist, text="🌙 Sötét mód", command=self.toggle_theme
         )
-        self.btn_theme.pack(side=tk.LEFT, padx=3)
+        self.btn_theme.pack(side=tk.LEFT, padx=2)
 
         ttk.Button(
             persist, text="💾", width=3, command=lambda: self.save_state(silent=False)
@@ -1707,16 +1733,136 @@ class MainWindow:
         ttk.Button(btn_row, text="💾 Exportálás", command=_do_export).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=2)
 
+    def panic_wipe(self) -> None:
+        """Emergency panic wipe: immediately halts workers and shreds all databases, logs, and state."""
+        if not messagebox.askyesno(
+            "🚨 PÁNIK TÖRLÉS VÉSZHELYZET",
+            "BIZTOSAN MEGSEMMISÍTESZ MINDEN ADATOT?\n\n"
+            "- Az összes mentett .onion cím, találat és metaadat törlődik.\n"
+            "- A helyi adatbázis (onion.db), a konfiguráció és a naplók azonnal megsemmisülnek.\n"
+            "- Ez a művelet visszavonhatatlan!",
+        ):
+            return
+
+        self.running = False
+        self.set_statusbar_color("#c0392b", msg="🚨 PÁNIK TÖRLÉS FOLYAMATBAN...")
+
+        # 1. Purge all in-memory state
+        with self.lock:
+            self.seen_fp.clear()
+            self.seen_btc.clear()
+            self.checked_urls.clear()
+            self.in_progress_urls.clear()
+            self.pending_queue.clear()
+            self.results.clear()
+            self.dead_blacklist.clear()
+            self.pending_results.clear()
+            self.pending_fp.clear()
+            self.pending_btc.clear()
+            self.pending_checked.clear()
+            self.pending_dead.clear()
+            self.stats = {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0}
+            self.success_count = 0
+            self.total_count = 0
+
+        # 2. Reset UI elements
+        self.tree.delete(*self.tree.get_children())
+        self.log_panel.clear()
+        self.extra_text.delete("1.0", tk.END)
+        self.prev_text.delete("1.0", tk.END)
+        self.lbl_prev_title.config(text="Minden adat törölve.")
+        self.lbl_prev_url.config(text="")
+        self.lbl_prev_meta.config(text="")
+        for lbl in [
+            self.lbl_total,
+            self.lbl_checked,
+            self.lbl_alive,
+            self.lbl_dead,
+            self.lbl_clone,
+            self.lbl_unique,
+            self.lbl_filtered,
+        ]:
+            try:
+                lbl.config(text="0")
+            except Exception:
+                pass
+        self.btn_resume.config(state=tk.DISABLED)
+
+        # 3. Secure file shredding (zeroing bytes then unlinking)
+        def _shred_file(p: Path) -> None:
+            if p.exists() and p.is_file():
+                try:
+                    size = p.stat().st_size
+                    with open(p, "wb") as f:
+                        f.write(b"\x00" * max(size, 1024))
+                        f.flush()
+                        os.fsync(f.fileno())
+                    p.unlink()
+                except Exception:
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+
+        # Target all sensitive state files
+        files_to_shred = [
+            DB_FILE,
+            Path(str(DB_FILE) + "-wal"),
+            Path(str(DB_FILE) + "-shm"),
+            STATE_DIR / "state_v3.json",
+            STATE_DIR / "dead_blacklist.json",
+            STATE_DIR / "config.json",
+            STATE_DIR / ".storage.key",
+        ]
+        if hasattr(self, "sqlite_backend") and getattr(self.sqlite_backend, "db_file", None):
+            db = Path(self.sqlite_backend.db_file)
+            files_to_shred.extend([db, Path(str(db) + "-wal"), Path(str(db) + "-shm")])
+        if hasattr(self, "json_backend"):
+            if getattr(self.json_backend, "state_file", None):
+                files_to_shred.append(Path(self.json_backend.state_file))
+            if getattr(self.json_backend, "dead_file", None):
+                files_to_shred.append(Path(self.json_backend.dead_file))
+        if STATE_DIR.exists():
+            for extra_f in STATE_DIR.glob("*"):
+                if extra_f.is_file():
+                    files_to_shred.append(extra_f)
+
+        for f_path in files_to_shred:
+            _shred_file(f_path)
+
+        try:
+            self.sqlite_backend.init_db()
+        except Exception:
+            pass
+
+        self.log_msg("[PANIC] 🚨 Pánik törlés lefutott: minden adatbázis és állapotfájl megsemmisítve!", force=True, tag="dead")
+        self.set_statusbar_color("#c0392b", msg="🚨 PÁNIK: MINDEN ADAT MEGSEMMISÍTVE")
+        messagebox.showinfo(
+            "Pánik Törlés Befejezve",
+            "Minden adatbázis, napló, ujjlenyomat és beállítás véglegesen és biztonságosan megsemmisítve.",
+        )
+
     def fetch_github_thread(self) -> None:
         def _run() -> None:
-            found = self.fetcher.fetch_github_seeds()
+            proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
+            allow_clearnet = self.allow_clearnet_var.get()
+            found = self.fetcher.fetch_github_seeds(proxy_url=proxy, allow_clearnet=allow_clearnet)
+            if not found and not allow_clearnet:
+                self.log_msg(
+                    "[SECURITY] GitHub seed letöltés blokkolva: Tor proxy nem elérhető és Clearnet tiltva!",
+                    force=True,
+                    tag="tor_err",
+                )
+                self.set_statusbar_color("#e67e22", msg="GitHub letöltés tiltva (Tor-only aktív)")
+                return
+
             self.root.after(
                 0,
                 lambda: self.extra_text.insert(
                     tk.END, "\n".join(list(found)[:400]) + "\n"
                 ),
             )
-            self.log_msg(f"[GITHUB] {len(found)} cím", force=True, tag="save")
+            self.log_msg(f"[GITHUB] {len(found)} cím letöltve (proxy: {proxy if proxy else 'clearnet'})", force=True, tag="save")
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1956,7 +2102,10 @@ class MainWindow:
             all_onions = set(extra)
 
             ahmia_onions = self.fetcher.search_ahmia(
-                queries, is_running_cb=lambda: self.running
+                queries,
+                proxy_url=proxy,
+                allow_clearnet=self.allow_clearnet_var.get(),
+                is_running_cb=lambda: self.running,
             )
             ose_onions = self.fetcher.search_onionsearchengine(
                 queries, is_running_cb=lambda: self.running

@@ -4,11 +4,13 @@ Uses lxml for 3-5x faster HTML parsing and httpx/aiohttp for async socket reuse.
 """
 import asyncio
 from datetime import datetime
+import logging
 from pathlib import Path
 import random
 import re
 import threading
 import time
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse
 import urllib.robotparser
 from bs4 import BeautifulSoup
@@ -187,14 +189,29 @@ class OnionFetcher:
         self.rate_limiter = DomainRateLimiter(min_domain_delay=domain_delay)
         self.robots_checker = RobotsChecker(enabled=respect_robots)
 
-    def fetch_github_seeds(self):
-        """Fetch discovered .onion addresses from public GitHub and Ahmia lists."""
+    def fetch_github_seeds(
+        self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
+    ) -> set:
+        """
+        Fetch discovered .onion addresses from GitHub and Ahmia lists.
+        Enforces Tor proxy routing unless clearnet is explicitly enabled.
+        """
+        if not allow_clearnet and not proxy_url:
+            logging.getLogger("onion_search").warning(
+                "[SECURITY] Clearnet seed letöltés blokkolva! Tor-only védelem aktív."
+            )
+            return set()
+
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         found = set()
         reg = re.compile(r"[a-z2-7]{56}\.onion")
         for src in GITHUB_SOURCES:
             try:
                 r = requests.get(
-                    src, timeout=15, headers=random.choice(HEADERS_LIST)
+                    src,
+                    timeout=15,
+                    headers=random.choice(HEADERS_LIST),
+                    proxies=proxies,
                 )
                 for m in reg.findall(r.text):
                     found.add(f"http://{m}")
@@ -205,6 +222,7 @@ class OnionFetcher:
                 "https://ahmia.fi/onions/",
                 timeout=15,
                 headers=random.choice(HEADERS_LIST),
+                proxies=proxies,
             )
             for m in reg.findall(r.text):
                 found.add(f"http://{m}")
@@ -212,8 +230,24 @@ class OnionFetcher:
             pass
         return found
 
-    def search_ahmia(self, queries, is_running_cb=None):
-        """Query Ahmia search engine for keywords and extract .onion links."""
+    def search_ahmia(
+        self,
+        queries,
+        proxy_url: Optional[str] = None,
+        allow_clearnet: bool = False,
+        is_running_cb=None,
+    ) -> set:
+        """
+        Query Ahmia search engine for keywords and extract .onion links.
+        Prevents deanonymization by routing through Tor proxy unless clearnet is allowed.
+        """
+        if not allow_clearnet and not proxy_url:
+            logging.getLogger("onion_search").warning(
+                "[SECURITY] Ahmia clearnet lekérdezés blokkolva! Tor-only mód aktív."
+            )
+            return set()
+
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         all_onions = set()
         for q in queries:
             if is_running_cb and not is_running_cb():
@@ -223,6 +257,7 @@ class OnionFetcher:
                     f"https://ahmia.fi/search/?q={requests.utils.quote(q)}",
                     timeout=15,
                     headers=random.choice(HEADERS_LIST),
+                    proxies=proxies,
                 )
                 soup = BeautifulSoup(r.text, HTML_PARSER)
                 for a in soup.find_all("a", href=True):

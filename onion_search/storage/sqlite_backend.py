@@ -1,20 +1,70 @@
 """
-SQLite storage backend.
+SQLite storage backend with optional Fernet cryptographic encryption for disk inspection protection.
 """
+import hashlib
+import hmac
 import json
+from pathlib import Path
 import sqlite3
 import time
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+from onion_search.storage.crypto import StorageEncryptor
 from onion_search.utils.helpers import DB_FILE
 
 
 class SQLiteBackend:
     """SQLite persistence backend for search results, fingerprints, and state."""
 
-    def __init__(self, db_file=DB_FILE):
-        self.db_file = db_file
+    def __init__(
+        self,
+        db_file: Union[str, Path] = DB_FILE,
+        encrypt_storage: bool = False,
+        encryptor: Optional[StorageEncryptor] = None,
+    ) -> None:
+        self.db_file = Path(db_file)
+        self.db_file.parent.mkdir(parents=True, exist_ok=True)
+        self.encrypt_storage = encrypt_storage
+        self.encryptor = encryptor or (StorageEncryptor() if encrypt_storage else None)
         self.init_db()
 
-    def init_db(self):
+    def _enc_url(self, url: str) -> str:
+        """Encrypt URL string if storage encryption is enabled, with keyed HMAC prefix for indexing."""
+        if not self.encrypt_storage or not self.encryptor or not url:
+            return url
+        if url.startswith("enc:"):
+            return url
+        try:
+            mac = hmac.new(self.encryptor.key, url.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+            cipher = self.encryptor.encrypt_bytes(url.encode("utf-8")).decode("utf-8")
+            return f"enc:{mac}:{cipher}"
+        except Exception:
+            return url
+
+    def _dec_url(self, stored: str) -> str:
+        """Decrypt URL string if it was encrypted with Fernet."""
+        if not stored or not stored.startswith("enc:"):
+            return stored
+        if not self.encryptor:
+            return stored
+        try:
+            parts = stored.split(":", 2)
+            if len(parts) == 3:
+                cipher = parts[2]
+            else:
+                cipher = parts[1]
+            return self.encryptor.decrypt_bytes(cipher.encode("utf-8")).decode("utf-8")
+        except Exception:
+            return stored
+
+    def _get_url_mac_pattern(self, url: str) -> str:
+        if not self.encrypt_storage or not self.encryptor or not url:
+            return url
+        mac = hmac.new(self.encryptor.key, url.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+        return f"enc:{mac}:%"
+
+    def init_db(self) -> None:
+        self.db_file.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(self.db_file)
         cur = con.cursor()
         cur.execute("PRAGMA journal_mode=WAL;")
@@ -54,7 +104,7 @@ class SQLiteBackend:
         con.commit()
         con.close()
 
-    def get_classification_by_fp(self, fp):
+    def get_classification_by_fp(self, fp: str) -> Optional[Tuple[str, str]]:
         """Query database for previously computed (lang, category) by content fingerprint."""
         if not self.db_file.exists() or not fp:
             return None
@@ -68,7 +118,7 @@ class SQLiteBackend:
         except Exception:
             return None
 
-    def get_fingerprint_url(self, fp):
+    def get_fingerprint_url(self, fp: str) -> Optional[str]:
         """Query database directly for an existing duplicate content fingerprint."""
         if not self.db_file.exists():
             return None
@@ -82,7 +132,7 @@ class SQLiteBackend:
         except Exception:
             return None
 
-    def get_btc_url(self, btc):
+    def get_btc_url(self, btc: str) -> Optional[str]:
         """Query database directly for an existing Bitcoin address mapping."""
         if not self.db_file.exists():
             return None
@@ -96,21 +146,25 @@ class SQLiteBackend:
         except Exception:
             return None
 
-    def is_url_checked(self, url):
+    def is_url_checked(self, url: str) -> bool:
         """Check if URL was already checked previously in the database."""
         if not self.db_file.exists():
             return False
         try:
             con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
             cur = con.cursor()
-            cur.execute("SELECT 1 FROM checked WHERE url = ? LIMIT 1", (url,))
+            pattern = self._get_url_mac_pattern(url)
+            cur.execute(
+                "SELECT 1 FROM checked WHERE url = ? OR url LIKE ? LIMIT 1",
+                (url, pattern),
+            )
             row = cur.fetchone()
             con.close()
             return bool(row)
         except Exception:
             return False
 
-    def load(self):
+    def load(self) -> Optional[Dict[str, Any]]:
         if not self.db_file.exists():
             return None
         con = sqlite3.connect(self.db_file)
@@ -134,7 +188,7 @@ class SQLiteBackend:
             cur.execute("SELECT btc,url FROM btc_map")
             seen_btc = {r[0]: r[1] for r in cur.fetchall()}
             cur.execute("SELECT url FROM checked")
-            checked_urls = [r[0] for r in cur.fetchall()]
+            checked_urls = [self._dec_url(r[0]) for r in cur.fetchall()]
             cur.execute("SELECT key,value FROM meta")
             meta = {}
             for k, v in cur.fetchall():
@@ -162,7 +216,7 @@ class SQLiteBackend:
             con.close()
             raise e
 
-    def save(self, data, incremental=False):
+    def save(self, data: Dict[str, Any], incremental: bool = False) -> None:
         con = sqlite3.connect(self.db_file)
         cur = con.cursor()
         cur.execute("PRAGMA journal_mode=WAL;")
@@ -189,7 +243,8 @@ class SQLiteBackend:
             cur.execute("INSERT OR REPLACE INTO btc_map (btc,url) VALUES (?,?)", (btc, url))
         for url in data.get("checked_urls", []):
             cur.execute(
-                "INSERT OR REPLACE INTO checked (url,ts) VALUES (?,?)", (url, time.time())
+                "INSERT OR REPLACE INTO checked (url,ts) VALUES (?,?)",
+                (self._enc_url(url), time.time()),
             )
         meta_items = {
             "stats": json.dumps(data.get("stats", {})),
@@ -207,13 +262,15 @@ class SQLiteBackend:
         if dead:
             cur.execute("BEGIN")
             for url, ts in dead.items():
-                cur.execute("INSERT OR REPLACE INTO dead (url,ts) VALUES (?,?)", (url, ts))
-            # takaritas
+                cur.execute(
+                    "INSERT OR REPLACE INTO dead (url,ts) VALUES (?,?)",
+                    (self._enc_url(url), ts),
+                )
             cur.execute("DELETE FROM dead WHERE ts < ?", (time.time() - 24 * 3600,))
             con.commit()
         con.close()
 
-    def save_pending(self, pending):
+    def save_pending(self, pending: Dict[str, Any]) -> bool:
         if not pending:
             return True
         con = sqlite3.connect(self.db_file)
@@ -242,7 +299,8 @@ class SQLiteBackend:
             cur.execute("INSERT OR REPLACE INTO btc_map (btc,url) VALUES (?,?)", (btc, url))
         for url in pending.get("checked_urls", []):
             cur.execute(
-                "INSERT OR REPLACE INTO checked (url,ts) VALUES (?,?)", (url, time.time())
+                "INSERT OR REPLACE INTO checked (url,ts) VALUES (?,?)",
+                (self._enc_url(url), time.time()),
             )
         if "stats" in pending:
             cur.execute(
@@ -253,7 +311,7 @@ class SQLiteBackend:
         con.close()
         return True
 
-    def save_dead_pending(self, pending_dead):
+    def save_dead_pending(self, pending_dead: Dict[str, float]) -> None:
         if not pending_dead:
             return
         try:
@@ -261,14 +319,17 @@ class SQLiteBackend:
             cur = con.cursor()
             cur.execute("BEGIN")
             for url, ts in pending_dead.items():
-                cur.execute("INSERT OR REPLACE INTO dead (url,ts) VALUES (?,?)", (url, ts))
+                cur.execute(
+                    "INSERT OR REPLACE INTO dead (url,ts) VALUES (?,?)",
+                    (self._enc_url(url), ts),
+                )
             cur.execute("DELETE FROM dead WHERE ts < ?", (time.time() - 24 * 3600,))
             con.commit()
             con.close()
         except Exception:
             pass
 
-    def load_dead(self):
+    def load_dead(self) -> Dict[str, float]:
         con = sqlite3.connect(self.db_file)
         cur = con.cursor()
         try:
@@ -278,7 +339,7 @@ class SQLiteBackend:
             con.commit()
             cur.execute("SELECT url,ts FROM dead")
             rows = cur.fetchall()
-            d = {r[0]: r[1] for r in rows if now - r[1] < 24 * 3600}
+            d = {self._dec_url(r[0]): r[1] for r in rows if now - r[1] < 24 * 3600}
             con.close()
             return d
         except Exception:
@@ -288,10 +349,10 @@ class SQLiteBackend:
                 pass
             return {}
 
-    def save_dead(self, dead_dict):
+    def save_dead(self, dead_dict: Dict[str, float]) -> None:
         self.save_dead_pending(dead_dict)
 
-    def cleanup_dead(self):
+    def cleanup_dead(self) -> None:
         try:
             con = sqlite3.connect(self.db_file)
             cur = con.cursor()
@@ -302,7 +363,17 @@ class SQLiteBackend:
         except Exception:
             pass
 
-    def clear(self):
+    def clear(self) -> None:
         if self.db_file.exists():
-            self.db_file.unlink()
+            try:
+                self.db_file.unlink()
+            except Exception:
+                pass
+        for ext in ["-wal", "-shm"]:
+            sidecar = Path(str(self.db_file) + ext)
+            if sidecar.exists():
+                try:
+                    sidecar.unlink()
+                except Exception:
+                    pass
         self.init_db()

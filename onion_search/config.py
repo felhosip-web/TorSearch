@@ -55,6 +55,8 @@ class AppConfig:
     total_threshold: int = DEFAULT_TOTAL_THRESHOLD
     auto_save: bool = True
     live_filtering: bool = True
+    allow_clearnet: bool = False
+    encrypt_storage: bool = False
     timeout_get: int = DEFAULT_TIMEOUT_GET
     domain_delay: float = DEFAULT_DOMAIN_DELAY
     queries: str = "forum, board, wiki, library"

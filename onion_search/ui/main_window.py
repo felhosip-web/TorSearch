@@ -105,7 +105,8 @@ class MainWindow:
         self.auto_save_var = tk.BooleanVar(value=cfg.auto_save)
         self.allow_clearnet_var = tk.BooleanVar(value=cfg.allow_clearnet)
         self.encrypt_storage_var = tk.BooleanVar(value=cfg.encrypt_storage)
-        self.status_var = tk.StringVar(value="Készen - v4.8 secure")
+        self.auto_seed_var = tk.BooleanVar(value=getattr(cfg, "auto_update_seeds", True))
+        self.status_var = tk.StringVar(value="Készen - v4.9 seeds")
 
         # Build UI layout
         self.setup_ui()
@@ -127,6 +128,12 @@ class MainWindow:
         self.root.bind("<Control-KP_Delete>", lambda e: self.panic_wipe())
 
         threading.Thread(target=self.check_tor_on_startup, daemon=True).start()
+        if self.auto_seed_var.get():
+            threading.Thread(target=self.auto_seed_update_on_startup, daemon=True).start()
+        try:
+            self.root.after(60000, self.schedule_periodic_seed_update)
+        except Exception:
+            pass
 
     def get_backend(self) -> Any:
         backend = (
@@ -358,6 +365,7 @@ class MainWindow:
                 live_filtering=self.filters_panel.live_filter_var.get(),
                 allow_clearnet=self.allow_clearnet_var.get(),
                 encrypt_storage=self.encrypt_storage_var.get(),
+                auto_update_seeds=self.auto_seed_var.get(),
                 queries=self.query_entry.get(),
             )
             self.config_manager.save(cfg)
@@ -521,10 +529,16 @@ class MainWindow:
 
         btn = ttk.Frame(left)
         btn.pack(fill=tk.X, pady=3)
-        self.btn_github = ttk.Button(
-            btn, text="GitHub", command=self.fetch_github_thread
+        self.btn_seeds = ttk.Button(
+            btn, text="🌱 Magok (Tor66, DeepSearch...)", command=self.update_seeds_thread
         )
-        self.btn_github.pack(side=tk.LEFT, padx=2)
+        self.btn_seeds.pack(side=tk.LEFT, padx=2)
+        self.btn_seeds.bind("<Button-3>", lambda e: self.open_seeds_dialog())
+        self.btn_seeds_cfg = ttk.Button(
+            btn, text="⚙️", width=3, command=self.open_seeds_dialog
+        )
+        self.btn_seeds_cfg.pack(side=tk.LEFT, padx=(0, 2))
+        self.btn_github = self.btn_seeds
         self.btn_start = ttk.Button(
             btn, text="▶ Start", command=self.start_thread
         )
@@ -543,7 +557,10 @@ class MainWindow:
         self.btn_newnym.pack(side=tk.LEFT, padx=(8, 2))
         ttk.Checkbutton(
             btn, text="Auto-mentés", variable=self.auto_save_var
-        ).pack(side=tk.LEFT, padx=5)
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(
+            btn, text="Auto-seed", variable=self.auto_seed_var
+        ).pack(side=tk.LEFT, padx=3)
 
         ttk.Label(left, text="Extra .onionok:").pack(anchor=tk.W)
         self.extra_text = scrolledtext.ScrolledText(left, height=3)
@@ -1842,29 +1859,331 @@ class MainWindow:
             "Minden adatbázis, napló, ujjlenyomat és beállítás véglegesen és biztonságosan megsemmisítve.",
         )
 
-    def fetch_github_thread(self) -> None:
+    def update_seeds_thread(
+        self, sources: Optional[List[str]] = None, silent: bool = False
+    ) -> None:
+        """Fetch fresh seeds across multiple providers (Tor66, Deep Search, Ahmia, GitHub, OSE)."""
         def _run() -> None:
             proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
             allow_clearnet = self.allow_clearnet_var.get()
-            found = self.fetcher.fetch_github_seeds(proxy_url=proxy, allow_clearnet=allow_clearnet)
-            if not found and not allow_clearnet:
+            active_sources = sources or parse_list(
+                getattr(self.config_manager.config, "seed_sources", "tor66,deepsearch,ahmia,github,ose")
+            )
+            if not silent:
+                src_names = ", ".join([s.upper() for s in active_sources])
                 self.log_msg(
-                    "[SECURITY] GitHub seed letöltés blokkolva: Tor proxy nem elérhető és Clearnet tiltva!",
+                    f"[SEED] Maglista frissítés indítása ({src_names})...",
                     force=True,
-                    tag="tor_err",
+                    tag="start",
                 )
-                self.set_statusbar_color("#e67e22", msg="GitHub letöltés tiltva (Tor-only aktív)")
+                self.set_statusbar_color("#2980b9", msg=f"Maglista letöltése ({src_names})...")
+
+            def _on_progress(src_name: str, count: int) -> None:
+                self.log_msg(f"[SEED] {src_name.upper()}: {count} cím találva", force=True, tag="info")
+
+            found, counts = self.fetcher.fetch_all_seeds(
+                proxy_url=proxy,
+                allow_clearnet=allow_clearnet,
+                selected_sources=active_sources,
+                on_source_progress=_on_progress,
+            )
+
+            if not found and not allow_clearnet and not proxy:
+                if not silent:
+                    self.log_msg(
+                        "[SECURITY] Maglista frissítés blokkolva: Tor proxy nem elérhető és Clearnet tiltva!",
+                        force=True,
+                        tag="tor_err",
+                    )
+                    self.set_statusbar_color("#e67e22", msg="Maglista tiltva (Tor-only aktív)")
                 return
 
-            self.root.after(
-                0,
-                lambda: self.extra_text.insert(
-                    tk.END, "\n".join(list(found)[:400]) + "\n"
-                ),
-            )
-            self.log_msg(f"[GITHUB] {len(found)} cím letöltve (proxy: {proxy if proxy else 'clearnet'})", force=True, tag="save")
+            # Deduplicate against checked and dead sets
+            new_seeds = [
+                u for u in found
+                if u not in self.checked_urls and u not in self.dead_blacklist
+            ]
+
+            def _update_ui() -> None:
+                try:
+                    if new_seeds:
+                        existing = self.extra_text.get("1.0", tk.END)
+                        existing_set = set(
+                            re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", existing)
+                        )
+                        to_add = [u for u in new_seeds if u not in existing_set]
+                        if to_add:
+                            self.extra_text.insert(tk.END, "\n".join(to_add[:600]) + "\n")
+                    if not silent:
+                        detail = ", ".join([f"{k}: {v}" for k, v in counts.items()])
+                        self.log_msg(
+                            f"[SEED] Sikeres frissítés! {len(found)} összes mag ({detail}), {len(new_seeds)} új cím hozzáadva.",
+                            force=True,
+                            tag="save",
+                        )
+                        self.set_statusbar_color(
+                            "#27ae60", msg=f"Maglista frissítve: {len(found)} cím"
+                        )
+                except Exception:
+                    pass
+
+            try:
+                self.root.after(0, _update_ui)
+            except Exception:
+                pass
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def open_seeds_dialog(self) -> None:
+        """Open Seed Manager & Multi-Source Configuration Dialog (Tor66, Deep Search, etc.)."""
+        win = tk.Toplevel(self.root)
+        win.title("🌱 Maglista Kezelő & Automatikus Frissítés")
+        win.geometry("560x540")
+        win.resizable(False, False)
+
+        ttk.Label(
+            win,
+            text="Többforrásos Maglista & Automatikus Frissítés",
+            font=("TkDefaultFont", 11, "bold"),
+        ).pack(pady=(12, 4))
+
+        # Status and Cache Info Card
+        stats_frame = ttk.LabelFrame(win, text="Gyorsítótár Állapota", padding=10)
+        stats_frame.pack(fill=tk.X, padx=16, pady=6)
+
+        cached_cnt = len(self.fetcher.seed_manager.cached_seeds)
+        last_ts = self.fetcher.seed_manager.last_update_ts
+        last_str = fmt_ts(last_ts) if last_ts > 0 else "Még nem volt frissítve"
+
+        lbl_cached = ttk.Label(
+            stats_frame,
+            text=f"Tárolt egyedi .onion magok: {cached_cnt} db  |  Utolsó frissítés: {last_str}",
+            font=("TkDefaultFont", 9, "bold"),
+        )
+        lbl_cached.pack(anchor=tk.W, pady=2)
+
+        cache_path = self.fetcher.seed_manager.cache_file
+        ttk.Label(
+            stats_frame,
+            text=f"Gyorsítótár fájl: {cache_path}",
+            font=("TkDefaultFont", 8),
+            foreground="#7f8c8d",
+        ).pack(anchor=tk.W)
+
+        # Provider Sources Selection
+        src_frame = ttk.LabelFrame(win, text="Aktív Magforrások Kiválasztása", padding=10)
+        src_frame.pack(fill=tk.X, padx=16, pady=6)
+
+        current_sources_str = getattr(
+            self.config_manager.config, "seed_sources", "tor66,deepsearch,ahmia,github,ose"
+        )
+        current_sources = [s.strip().lower() for s in current_sources_str.split(",") if s.strip()]
+
+        var_tor66 = tk.BooleanVar(value="tor66" in current_sources)
+        var_deepsearch = tk.BooleanVar(value="deepsearch" in current_sources)
+        var_ahmia = tk.BooleanVar(value="ahmia" in current_sources)
+        var_github = tk.BooleanVar(value="github" in current_sources)
+        var_ose = tk.BooleanVar(value="ose" in current_sources)
+
+        ttk.Checkbutton(
+            src_frame,
+            text="🧅 Tor66 — Friss rejtett szolgáltatás katalógus (.onion / tükör)",
+            variable=var_tor66,
+        ).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(
+            src_frame,
+            text="🔍 Deep Search — Onion címkatalógus & linkgyűjtemény (.onion / tükör)",
+            variable=var_deepsearch,
+        ).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(
+            src_frame,
+            text="🌐 Ahmia — Folyamatosan frissülő .onion index (.onion / clearnet)",
+            variable=var_ahmia,
+        ).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(
+            src_frame,
+            text="🐙 GitHub — Kurált onion listák (DanMcInerney, Alec Muffett)",
+            variable=var_github,
+        ).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(
+            src_frame,
+            text="🔎 OnionSearchEngine — Keresőmotoros aggregáció",
+            variable=var_ose,
+        ).pack(anchor=tk.W, pady=2)
+
+        # Automation Options
+        auto_frame = ttk.LabelFrame(win, text="Automatikus Ütemezés & Beállítások", padding=10)
+        auto_frame.pack(fill=tk.X, padx=16, pady=6)
+
+        ttk.Checkbutton(
+            auto_frame,
+            text="Automatikus háttérfrissítés bekapcsolva",
+            variable=self.auto_seed_var,
+        ).pack(anchor=tk.W, pady=2)
+
+        int_row = ttk.Frame(auto_frame)
+        int_row.pack(fill=tk.X, pady=4)
+        ttk.Label(int_row, text="Frissítési időköz:").pack(side=tk.LEFT, padx=(0, 6))
+
+        cur_int = int(getattr(self.config_manager.config, "seed_update_interval_hours", 12))
+        interval_var = tk.StringVar(value=f"{cur_int} óra")
+        combo = ttk.Combobox(
+            int_row,
+            textvariable=interval_var,
+            values=["6 óra", "12 óra", "24 óra", "48 óra"],
+            state="readonly",
+            width=14,
+        )
+        combo.pack(side=tk.LEFT)
+
+        status_lbl = ttk.Label(win, text="", foreground="#27ae60", font=("TkDefaultFont", 9))
+        status_lbl.pack(pady=4)
+
+        def _get_selected_sources() -> List[str]:
+            sel = []
+            if var_tor66.get(): sel.append("tor66")
+            if var_deepsearch.get(): sel.append("deepsearch")
+            if var_ahmia.get(): sel.append("ahmia")
+            if var_github.get(): sel.append("github")
+            if var_ose.get(): sel.append("ose")
+            return sel or ["tor66", "deepsearch"]
+
+        def _save_settings():
+            sel = _get_selected_sources()
+            self.config_manager.config.seed_sources = ",".join(sel)
+            self.config_manager.config.auto_update_seeds = self.auto_seed_var.get()
+            try:
+                val = int(interval_var.get().split()[0])
+                self.config_manager.config.seed_update_interval_hours = float(val)
+            except Exception:
+                pass
+            self.config_manager.save()
+            status_lbl.config(text="Beállítások sikeresen mentve!", foreground="#27ae60")
+
+        btn_box = ttk.Frame(win)
+        btn_box.pack(fill=tk.X, padx=16, pady=6)
+
+        def _trigger_fetch(sources=None):
+            _save_settings()
+            status_lbl.config(text="Maglista letöltése folyamatban...", foreground="#2980b9")
+            self.update_seeds_thread(sources=sources)
+            win.after(2500, lambda: _refresh_stats())
+
+        def _refresh_stats():
+            cnt = len(self.fetcher.seed_manager.cached_seeds)
+            ts = self.fetcher.seed_manager.last_update_ts
+            ts_str = fmt_ts(ts) if ts > 0 else "Még nem volt frissítve"
+            lbl_cached.config(text=f"Tárolt egyedi .onion magok: {cnt} db  |  Utolsó frissítés: {ts_str}")
+            status_lbl.config(text=f"Frissítve! {cnt} mag található a gyorsítótárban.", foreground="#27ae60")
+
+        def _clear_cache():
+            self.fetcher.seed_manager.cached_seeds = set()
+            self.fetcher.seed_manager.last_update_ts = 0.0
+            if self.fetcher.seed_manager.cache_file.exists():
+                try:
+                    self.fetcher.seed_manager.cache_file.unlink()
+                except Exception:
+                    pass
+            _refresh_stats()
+            status_lbl.config(text="Gyorsítótár kiürítve.", foreground="#e67e22")
+
+        row1 = ttk.Frame(btn_box)
+        row1.pack(fill=tk.X, pady=2)
+        ttk.Button(
+            row1,
+            text="🔄 Frissítés Most (Kijelölt források)",
+            command=lambda: _trigger_fetch(_get_selected_sources()),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
+        row2 = ttk.Frame(btn_box)
+        row2.pack(fill=tk.X, pady=2)
+        ttk.Button(
+            row2,
+            text="🧅 Csak Tor66",
+            command=lambda: _trigger_fetch(["tor66"]),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(
+            row2,
+            text="🔍 Csak Deep Search",
+            command=lambda: _trigger_fetch(["deepsearch"]),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
+        row3 = ttk.Frame(btn_box)
+        row3.pack(fill=tk.X, pady=2)
+        ttk.Button(
+            row3,
+            text="🗑️ Gyorsítótár Ürítése",
+            command=_clear_cache,
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            row3,
+            text="Mentés & Bezárás",
+            command=lambda: (_save_settings(), win.destroy()),
+        ).pack(side=tk.RIGHT, padx=2)
+
+    def fetch_github_thread(self) -> None:
+        """Alias for backwards compatibility and targeted GitHub fetch."""
+        self.update_seeds_thread(sources=["github"])
+
+    def auto_seed_update_on_startup(self) -> None:
+        """Background startup auto-seed check."""
+        time.sleep(2)
+        try:
+            if not self.root.winfo_exists():
+                return
+        except Exception:
+            return
+        interval = getattr(self.config_manager.config, "seed_update_interval_hours", 12.0)
+        if self.fetcher.seed_manager.is_update_due(interval_hours=interval):
+            self.log_msg(
+                "[SEED] Automatikus maglista frissítés indul (Tor66, Deep Search, Ahmia, GitHub)...",
+                force=True,
+                tag="info",
+            )
+            self.update_seeds_thread(silent=True)
+        else:
+            cached = self.fetcher.seed_manager.cached_seeds
+            if cached:
+                def _inject():
+                    try:
+                        existing = self.extra_text.get("1.0", tk.END)
+                        existing_set = set(
+                            re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", existing)
+                        )
+                        to_add = [
+                            u for u in cached
+                            if u not in existing_set and u not in self.checked_urls and u not in self.dead_blacklist
+                        ]
+                        if to_add:
+                            self.extra_text.insert(tk.END, "\n".join(to_add[:400]) + "\n")
+                            self.log_msg(
+                                f"[SEED] {len(to_add)} gyorsítótárazott mag betöltve lemezről.",
+                                force=True,
+                                tag="save",
+                            )
+                    except Exception:
+                        pass
+                try:
+                    self.root.after(0, _inject)
+                except Exception:
+                    pass
+
+    def schedule_periodic_seed_update(self) -> None:
+        """Periodic background check for automatic seed updates."""
+        try:
+            if not self.root.winfo_exists():
+                return
+            interval = getattr(self.config_manager.config, "seed_update_interval_hours", 12.0)
+            if self.auto_seed_var.get() and self.fetcher.seed_manager.is_update_due(interval_hours=interval):
+                self.update_seeds_thread(silent=True)
+        except Exception:
+            pass
+        finally:
+            try:
+                # Check periodically every 30 minutes
+                self.root.after(1800000, self.schedule_periodic_seed_update)
+            except Exception:
+                pass
 
     def fetch_one(self, url: str, proxy_url: str) -> Dict[str, Any]:
         now_ts = time.time()

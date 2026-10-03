@@ -21,6 +21,10 @@ from onion_search.core.neonym import (
     check_tor_socks,
     check_control_port,
 )
+from onion_search.core.seeds import (
+    SeedManager,
+    extract_onion_urls,
+)
 
 __all__ = [
     "ContentDetector",
@@ -37,4 +41,6 @@ __all__ = [
     "send_newnym_via_control",
     "check_tor_socks",
     "check_control_port",
+    "SeedManager",
+    "extract_onion_urls",
 ]

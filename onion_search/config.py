@@ -15,6 +15,7 @@ STATE_DIR = CONFIG_DIR
 DB_FILE = STATE_DIR / "onion.db"
 DEFAULT_STATE_FILE = STATE_DIR / "state_v3.json"
 DEFAULT_DEAD_FILE = STATE_DIR / "dead_blacklist.json"
+DEFAULT_SEEDS_FILE = STATE_DIR / "seeds_cache.json"
 
 # Network & Scraping Constants (eliminating magic numbers)
 DEFAULT_TIMEOUT_GET: int = 20
@@ -57,6 +58,10 @@ class AppConfig:
     live_filtering: bool = True
     allow_clearnet: bool = False
     encrypt_storage: bool = False
+    auto_update_seeds: bool = True
+    seed_sources: str = "tor66,deepsearch,ahmia,github,ose"
+    seed_update_interval_hours: float = 12.0
+    last_seed_update: float = 0.0
     timeout_get: int = DEFAULT_TIMEOUT_GET
     domain_delay: float = DEFAULT_DOMAIN_DELAY
     queries: str = "forum, board, wiki, library"

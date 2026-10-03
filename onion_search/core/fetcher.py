@@ -24,6 +24,7 @@ from onion_search.core.detector import (
     extract_bitcoin_addresses,
     extract_fingerprint,
 )
+from onion_search.core.seeds import SeedManager
 from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET
 
 # Fast lxml parser detection with graceful fallback
@@ -182,12 +183,41 @@ class OnionFetcher:
         max_retries=2,
         domain_delay=1.0,
         respect_robots=False,
+        seed_manager=None,
     ):
         self.session_manager = session_manager or SessionManager()
         self.detector = detector or ContentDetector()
         self.max_retries = max_retries
         self.rate_limiter = DomainRateLimiter(min_domain_delay=domain_delay)
         self.robots_checker = RobotsChecker(enabled=respect_robots)
+        self.seed_manager = seed_manager or SeedManager()
+
+    def fetch_tor66_seeds(
+        self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
+    ) -> Set[str]:
+        """Fetch discovered .onion addresses from Tor66 directory."""
+        return self.seed_manager.fetch_tor66(proxy_url=proxy_url, allow_clearnet=allow_clearnet)
+
+    def fetch_deepsearch_seeds(
+        self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
+    ) -> Set[str]:
+        """Fetch discovered .onion addresses from Deep Search directory."""
+        return self.seed_manager.fetch_deepsearch(proxy_url=proxy_url, allow_clearnet=allow_clearnet)
+
+    def fetch_all_seeds(
+        self,
+        proxy_url: Optional[str] = None,
+        allow_clearnet: bool = False,
+        selected_sources: Optional[List[str]] = None,
+        on_source_progress: Optional[Callable[[str, int], None]] = None,
+    ) -> Tuple[Set[str], Dict[str, int]]:
+        """Fetch and aggregate seeds from all sources (Tor66, Deep Search, Ahmia, GitHub, OSE)."""
+        return self.seed_manager.fetch_all(
+            proxy_url=proxy_url,
+            allow_clearnet=allow_clearnet,
+            selected_sources=selected_sources,
+            on_source_progress=on_source_progress,
+        )
 
     def fetch_github_seeds(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
@@ -472,33 +502,81 @@ class OnionFetcher:
 
             headers = random.choice(HEADERS_LIST)
             try:
-                async with client.get(url, timeout=TIMEOUT_GET, allow_redirects=True, headers=headers) as r:
-                    final_url = str(r.url)
-                    last_code = r.status
-                    text = await r.text()
+                res_cm = client.get(url, timeout=TIMEOUT_GET, allow_redirects=True, headers=headers)
+                if hasattr(res_cm, "__aenter__"):
+                    async with res_cm as r:
+                        final_url = str(getattr(r, "url", url))
+                        status_val = getattr(r, "status", None)
+                        if status_val is None or not isinstance(status_val, int):
+                            status_val = getattr(r, "status_code", 200)
+                            if not isinstance(status_val, int):
+                                status_val = 200
+                        last_code = status_val
+                        text_attr = getattr(r, "text", "")
+                        if asyncio.iscoroutine(text_attr):
+                            text = await text_attr
+                        elif callable(text_attr):
+                            res_t = text_attr()
+                            text = await res_t if asyncio.iscoroutine(res_t) else str(res_t)
+                        else:
+                            text = str(text_attr)
+                elif asyncio.iscoroutine(res_cm):
+                    r = await res_cm
+                    final_url = str(getattr(r, "url", url))
+                    status_val = getattr(r, "status", None)
+                    if status_val is None or not isinstance(status_val, int):
+                        status_val = getattr(r, "status_code", 200)
+                        if not isinstance(status_val, int):
+                            status_val = 200
+                    last_code = status_val
+                    text_attr = getattr(r, "text", "")
+                    if asyncio.iscoroutine(text_attr):
+                        text = await text_attr
+                    elif callable(text_attr):
+                        res_t = text_attr()
+                        text = await res_t if asyncio.iscoroutine(res_t) else str(res_t)
+                    else:
+                        text = str(text_attr)
+                else:
+                    r = res_cm
+                    final_url = str(getattr(r, "url", url))
+                    status_val = getattr(r, "status", None)
+                    if status_val is None or not isinstance(status_val, int):
+                        status_val = getattr(r, "status_code", 200)
+                        if not isinstance(status_val, int):
+                            status_val = 200
+                    last_code = status_val
+                    text_attr = getattr(r, "text", "")
+                    if asyncio.iscoroutine(text_attr):
+                        text = await text_attr
+                    elif callable(text_attr):
+                        res_t = text_attr()
+                        text = await res_t if asyncio.iscoroutine(res_t) else str(res_t)
+                    else:
+                        text = str(text_attr)
 
-                    if r.status in (429, 503) and attempt < self.max_retries:
-                        backoff = (2**attempt) * 1.5
+                if last_code in (429, 503) and attempt < self.max_retries:
+                    backoff = (2**attempt) * 1.5
+                    await asyncio.sleep(backoff)
+                    continue
+
+                if last_code != 200 or len(text) < 300:
+                    if last_code in (500, 502, 504) and attempt < self.max_retries:
+                        backoff = 2**attempt
                         await asyncio.sleep(backoff)
                         continue
 
-                    if r.status != 200 or len(text) < 300:
-                        if r.status in (500, 502, 504) and attempt < self.max_retries:
-                            backoff = 2**attempt
-                            await asyncio.sleep(backoff)
-                            continue
+                    return {
+                        "url": final_url if ".onion" in final_url else url,
+                        "status": "dead",
+                        "code": last_code,
+                        "ts": now_ts,
+                        "lang": "en",
+                        "category": "other",
+                    }
 
-                        return {
-                            "url": final_url if ".onion" in final_url else url,
-                            "status": "dead",
-                            "code": r.status,
-                            "ts": now_ts,
-                            "lang": "en",
-                            "category": "other",
-                        }
-
-                    html = text
-                    break
+                html = text
+                break
 
             except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
                 last_error = str(e)[:100]

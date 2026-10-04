@@ -1,6 +1,20 @@
+# Copyright 2026 HES Projects by FePe
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 High-performance network operations, async/sync fetchers, domain rate-limiting, and retry logic.
 Uses lxml for 3-5x faster HTML parsing and httpx/aiohttp for async socket reuse.
+Developed by HES Projects by FePe.
 """
 import asyncio
 from datetime import datetime
@@ -203,6 +217,30 @@ class OnionFetcher:
     ) -> Set[str]:
         """Fetch discovered .onion addresses from Deep Search directory."""
         return self.seed_manager.fetch_deepsearch(proxy_url=proxy_url, allow_clearnet=allow_clearnet)
+
+    def fetch_haystak_seeds(
+        self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
+    ) -> Set[str]:
+        """Fetch discovered .onion addresses from Haystak search engine."""
+        return self.seed_manager.fetch_haystak(proxy_url=proxy_url, allow_clearnet=allow_clearnet)
+
+    def fetch_onionland_seeds(
+        self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
+    ) -> Set[str]:
+        """Fetch discovered .onion addresses from OnionLand search engine."""
+        return self.seed_manager.fetch_onionland(proxy_url=proxy_url, allow_clearnet=allow_clearnet)
+
+    def fetch_torch_seeds(
+        self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
+    ) -> Set[str]:
+        """Fetch discovered .onion addresses from Torch search engine."""
+        return self.seed_manager.fetch_torch(proxy_url=proxy_url, allow_clearnet=allow_clearnet)
+
+    def fetch_notevil_seeds(
+        self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
+    ) -> Set[str]:
+        """Fetch discovered .onion addresses from not Evil search engine."""
+        return self.seed_manager.fetch_notevil(proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_all_seeds(
         self,

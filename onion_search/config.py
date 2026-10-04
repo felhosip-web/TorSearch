@@ -1,3 +1,16 @@
+# Copyright 2026 HES Projects by FePe
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Configuration management and constants for Onion Kereso.
 Persists application settings to ~/.config/onion_search/config.json.
@@ -7,6 +20,13 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict
+
+# Application Metadata
+APP_NAME = "Onion Kereső"
+APP_VERSION = "4.9.3"
+APP_AUTHOR = "HES Projects by FePe"
+APP_LICENSE = "Apache-2.0"
+APP_COPYRIGHT = "Copyright 2026 HES Projects by FePe"
 
 # Central storage directories
 CONFIG_DIR = Path.home() / ".config" / "onion_search"
@@ -59,7 +79,7 @@ class AppConfig:
     allow_clearnet: bool = False
     encrypt_storage: bool = False
     auto_update_seeds: bool = True
-    seed_sources: str = "tor66,deepsearch,ahmia,github,ose"
+    seed_sources: str = "tor66,deepsearch,haystak,onionland,github,ose,torch,notevil"
     seed_update_interval_hours: float = 12.0
     last_seed_update: float = 0.0
     timeout_get: int = DEFAULT_TIMEOUT_GET

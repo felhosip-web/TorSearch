@@ -1,6 +1,20 @@
+# Copyright 2026 HES Projects by FePe
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Main application window coordinating UI components, search lifecycle, persistence, and UX features.
 Integrates standard logging, ConfigManager persistence, and constants configuration.
+Developed by HES Projects by FePe.
 """
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,6 +34,11 @@ from tkinter import messagebox, scrolledtext, ttk
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from onion_search.config import (
+    APP_AUTHOR,
+    APP_COPYRIGHT,
+    APP_LICENSE,
+    APP_NAME,
+    APP_VERSION,
     AppConfig,
     ConfigManager,
     DB_FILE,
@@ -36,7 +55,7 @@ from onion_search.storage.json_backend import JSONBackend
 from onion_search.storage.sqlite_backend import SQLiteBackend
 from onion_search.ui.filters import FilterPanel
 from onion_search.ui.log_panel import LogPanel, logger
-from onion_search.utils.helpers import fmt_ts
+from onion_search.utils.helpers import fmt_ts, parse_list
 
 
 class MainWindow:
@@ -53,7 +72,7 @@ class MainWindow:
         config_manager: Optional[ConfigManager] = None,
     ) -> None:
         self.root: tk.Tk = root
-        self.root.title("Onion Kereso v4.8 - secure & stable")
+        self.root.title(f"{APP_NAME} v{APP_VERSION} — {APP_AUTHOR} ({APP_LICENSE})")
         self.root.geometry("1400x940")
 
         # Configuration manager
@@ -441,6 +460,9 @@ class MainWindow:
         ttk.Button(persist, text="🗑", width=3, command=self.clear_state).pack(
             side=tk.LEFT, padx=1
         )
+        ttk.Button(
+            persist, text="ℹ️ Licenc", command=self.open_about_dialog
+        ).pack(side=tk.LEFT, padx=2)
 
         # 2. Status & NEWNYM toolbar
         status_top = ttk.Frame(self.root, padding=(8, 2))
@@ -1937,13 +1959,13 @@ class MainWindow:
     def open_seeds_dialog(self) -> None:
         """Open Seed Manager & Multi-Source Configuration Dialog (Tor66, Deep Search, etc.)."""
         win = tk.Toplevel(self.root)
-        win.title("🌱 Maglista Kezelő & Automatikus Frissítés")
-        win.geometry("560x540")
-        win.resizable(False, False)
+        win.title("🌱 Maglista Kezelő & Intelligens Fallback Frissítés")
+        win.geometry("580x680")
+        win.resizable(False, True)
 
         ttk.Label(
             win,
-            text="Többforrásos Maglista & Automatikus Frissítés",
+            text="Többforrásos Maglista & Prioritásos Fallback Rendszer",
             font=("TkDefaultFont", 11, "bold"),
         ).pack(pady=(12, 4))
 
@@ -1970,46 +1992,70 @@ class MainWindow:
             foreground="#7f8c8d",
         ).pack(anchor=tk.W)
 
-        # Provider Sources Selection
-        src_frame = ttk.LabelFrame(win, text="Aktív Magforrások Kiválasztása", padding=10)
+        # Provider Sources Selection (In Prioritized Order)
+        src_frame = ttk.LabelFrame(win, text="Aktív Magforrások & Prioritási Lánc (Fallback < 10 találatnál)", padding=10)
         src_frame.pack(fill=tk.X, padx=16, pady=6)
 
         current_sources_str = getattr(
-            self.config_manager.config, "seed_sources", "tor66,deepsearch,ahmia,github,ose"
+            self.config_manager.config, "seed_sources", "tor66,deepsearch,haystak,onionland,github,ose,torch,notevil"
         )
         current_sources = [s.strip().lower() for s in current_sources_str.split(",") if s.strip()]
 
         var_tor66 = tk.BooleanVar(value="tor66" in current_sources)
         var_deepsearch = tk.BooleanVar(value="deepsearch" in current_sources)
-        var_ahmia = tk.BooleanVar(value="ahmia" in current_sources)
+        var_haystak = tk.BooleanVar(value="haystak" in current_sources)
+        var_onionland = tk.BooleanVar(value="onionland" in current_sources)
         var_github = tk.BooleanVar(value="github" in current_sources)
         var_ose = tk.BooleanVar(value="ose" in current_sources)
+        var_torch = tk.BooleanVar(value="torch" in current_sources)
+        var_notevil = tk.BooleanVar(value="notevil" in current_sources)
+        var_ahmia = tk.BooleanVar(value="ahmia" in current_sources)
 
         ttk.Checkbutton(
             src_frame,
-            text="🧅 Tor66 — Friss rejtett szolgáltatás katalógus (.onion / tükör)",
+            text="1. 🧅 Tor66 — Elsődleges friss rejtett szolgáltatás katalógus (.onion / tükör)",
             variable=var_tor66,
-        ).pack(anchor=tk.W, pady=2)
+        ).pack(anchor=tk.W, pady=1)
         ttk.Checkbutton(
             src_frame,
-            text="🔍 Deep Search — Onion címkatalógus & linkgyűjtemény (.onion / tükör)",
+            text="2. 🔍 Deep Search — Strukturált címkatalógus & linkgyűjtemény (.onion / tükör)",
             variable=var_deepsearch,
-        ).pack(anchor=tk.W, pady=2)
+        ).pack(anchor=tk.W, pady=1)
         ttk.Checkbutton(
             src_frame,
-            text="🌐 Ahmia — Folyamatosan frissülő .onion index (.onion / clearnet)",
-            variable=var_ahmia,
-        ).pack(anchor=tk.W, pady=2)
+            text="3. 🌾 Haystak — Történelmi nagy lefedettségű onion kereső (.onion / tükör)",
+            variable=var_haystak,
+        ).pack(anchor=tk.W, pady=1)
         ttk.Checkbutton(
             src_frame,
-            text="🐙 GitHub — Kurált onion listák (DanMcInerney, Alec Muffett)",
+            text="4. 🗺️ OnionLand — Keresőmotoros mélywebes index (.onion / tükör)",
+            variable=var_onionland,
+        ).pack(anchor=tk.W, pady=1)
+        ttk.Checkbutton(
+            src_frame,
+            text="5. 🐙 GitHub — Kurált onion listák (DanMcInerney, Alec Muffett)",
             variable=var_github,
-        ).pack(anchor=tk.W, pady=2)
+        ).pack(anchor=tk.W, pady=1)
         ttk.Checkbutton(
             src_frame,
-            text="🔎 OnionSearchEngine — Keresőmotoros aggregáció",
+            text="6. 🔎 OnionSearchEngine — Keresőmotoros aggregáció",
             variable=var_ose,
-        ).pack(anchor=tk.W, pady=2)
+        ).pack(anchor=tk.W, pady=1)
+        ttk.Checkbutton(
+            src_frame,
+            text="7. 🔦 Torch — Régi, megbízható onion indexelő (.onion / tükör)",
+            variable=var_torch,
+        ).pack(anchor=tk.W, pady=1)
+        ttk.Checkbutton(
+            src_frame,
+            text="8. 👁️ not Evil — Utolsó mentsvár fallback motor (.onion / tükör)",
+            variable=var_notevil,
+        ).pack(anchor=tk.W, pady=1)
+        ttk.Checkbutton(
+            src_frame,
+            text="+ 🌐 Ahmia — Folyamatosan frissülő .onion index (.onion / clearnet)",
+            variable=var_ahmia,
+        ).pack(anchor=tk.W, pady=1)
 
         # Automation Options
         auto_frame = ttk.LabelFrame(win, text="Automatikus Ütemezés & Beállítások", padding=10)
@@ -2043,9 +2089,13 @@ class MainWindow:
             sel = []
             if var_tor66.get(): sel.append("tor66")
             if var_deepsearch.get(): sel.append("deepsearch")
-            if var_ahmia.get(): sel.append("ahmia")
+            if var_haystak.get(): sel.append("haystak")
+            if var_onionland.get(): sel.append("onionland")
             if var_github.get(): sel.append("github")
             if var_ose.get(): sel.append("ose")
+            if var_torch.get(): sel.append("torch")
+            if var_notevil.get(): sel.append("notevil")
+            if var_ahmia.get(): sel.append("ahmia")
             return sel or ["tor66", "deepsearch"]
 
         def _save_settings():
@@ -2120,6 +2170,53 @@ class MainWindow:
             text="Mentés & Bezárás",
             command=lambda: (_save_settings(), win.destroy()),
         ).pack(side=tk.RIGHT, padx=2)
+
+    def open_about_dialog(self) -> None:
+        """Open About & Apache License 2.0 attribution dialog."""
+        win = tk.Toplevel(self.root)
+        win.title(f"ℹ️ Névjegy & {APP_LICENSE} Licenc — {APP_AUTHOR}")
+        win.geometry("560x440")
+        win.resizable(False, False)
+
+        ttk.Label(
+            win, text=APP_NAME, font=("TkDefaultFont", 13, "bold")
+        ).pack(pady=(16, 2))
+        ttk.Label(
+            win, text=f"Verzió: {APP_VERSION}  |  Licenc: Apache License 2.0", font=("TkDefaultFont", 9)
+        ).pack(pady=(0, 6))
+
+        info_frame = ttk.LabelFrame(win, text="Szerző & Jogtulajdonos", padding=10)
+        info_frame.pack(fill=tk.X, padx=16, pady=6)
+        ttk.Label(
+            info_frame, text=f"Szerző: {APP_AUTHOR}", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor=tk.W, pady=2)
+        ttk.Label(
+            info_frame, text=f"{APP_COPYRIGHT}. Minden jog fenntartva.", font=("TkDefaultFont", 9)
+        ).pack(anchor=tk.W)
+
+        lic_frame = ttk.LabelFrame(win, text="Apache License 2.0 Feltételek", padding=10)
+        lic_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=6)
+
+        lic_text = scrolledtext.ScrolledText(lic_frame, height=9, font=("Courier", 8))
+        lic_text.pack(fill=tk.BOTH, expand=True)
+        lic_text.insert(
+            tk.END,
+            f"Copyright 2026 {APP_AUTHOR}\n\n"
+            "Licensed under the Apache License, Version 2.0 (the \"License\");\n"
+            "you may not use this file except in compliance with the License.\n"
+            "You may obtain a copy of the License at:\n\n"
+            "    http://www.apache.org/licenses/LICENSE-2.0\n\n"
+            "Unless required by applicable law or agreed to in writing, software\n"
+            "distributed under the License is distributed on an \"AS IS\" BASIS,\n"
+            "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n"
+            "See the License for the specific language governing permissions and\n"
+            "limitations under the License.\n"
+        )
+        lic_text.config(state=tk.DISABLED)
+
+        btn_box = ttk.Frame(win)
+        btn_box.pack(fill=tk.X, padx=16, pady=(6, 12))
+        ttk.Button(btn_box, text="Rendben (Bezárás)", command=win.destroy).pack(side=tk.RIGHT)
 
     def fetch_github_thread(self) -> None:
         """Alias for backwards compatibility and targeted GitHub fetch."""

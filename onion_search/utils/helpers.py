@@ -1,5 +1,19 @@
+# Copyright 2026 HES Projects by FePe
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Helper utilities, formatting, and string parsing functions with full type annotations.
+Developed by HES Projects by FePe.
 """
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +64,47 @@ AHMIA_SOURCES: Dict[str, str] = {
 OSE_SOURCES: Dict[str, str] = {
     "clearnet": "https://onionsearchengine.com/search.php?search=wiki",
 }
+
+# 3. Haystak
+HAYSTAK_SOURCES: Dict[str, str] = {
+    "onion": "http://haystak5njsmn2hqkewecpaxetahtwhsbsa64jom2k22z5afxhnpxfid.onion/?q=wiki",
+    "clearnet": "https://haystak.onion.pet/?q=wiki",
+    "clearnet_alt": "https://haystak.onion.ws/?q=wiki",
+}
+
+# 4. OnionLand
+ONIONLAND_SOURCES: Dict[str, str] = {
+    "onion": "http://onionland74v76h2n74i3w6u6v2o6q6w7x2k4y2b5a2c3d4e5f6g7h8ij.onion/search?q=hidden",
+    "clearnet": "https://onionlandsearchengine.com/search?q=wiki",
+    "clearnet_alt": "https://onionland.onion.pet/search?q=wiki",
+}
+
+# 7. Torch
+TORCH_SOURCES: Dict[str, str] = {
+    "onion": "http://xmh57jrknzkhv6y3ls3ubitzfqnkrwxhopf5aygthi7d6rfdvgchu6qd.onion/cgi-bin/omega/omega?P=wiki",
+    "clearnet": "https://torch.onion.pet/cgi-bin/omega/omega?P=wiki",
+}
+
+# 8. not Evil (last resort)
+NOTEVIL_SOURCES: Dict[str, str] = {
+    "onion": "http://hss3uro2hsxfogfq.onion/index.php?q=wiki",
+    "clearnet": "https://notevil.onion.pet/?q=wiki",
+}
+
+# Priority sequence for seed fallback cascades
+DEFAULT_SEED_PRIORITY: List[str] = [
+    "tor66",
+    "deepsearch",
+    "haystak",
+    "onionland",
+    "github",
+    "ose",
+    "torch",
+    "notevil",
+]
+
+# Minimum acceptable yield from a single provider before triggering fallback to next
+MIN_SEED_YIELD_THRESHOLD: int = 10
 
 
 def fmt_ts(ts: Optional[Union[float, int, str]]) -> str:

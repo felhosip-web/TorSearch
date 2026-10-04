@@ -1,6 +1,6 @@
 {
   "name": "Onion Kereso Refactor",
-  "description": "Architectural refactoring of Onion Kereso into clean modular architecture.",
+  "description": "Architectural refactoring of Onion Kereso into clean modular architecture under Apache-2.0 license by HES Projects by FePe.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

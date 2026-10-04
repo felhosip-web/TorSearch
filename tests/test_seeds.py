@@ -138,6 +138,72 @@ def test_onion_fetcher_seed_delegation():
         assert "tor66" in counts
 
 
+def test_prioritized_fallback_cascade_and_threshold():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_file = Path(tmpdir) / "seeds_cache.json"
+        mgr = SeedManager(cache_file=cache_file)
+
+        # Mock responses: Tor66 gives 0, DeepSearch gives 3 (< 10), Haystak gives 12 (>= 10)
+        u1 = "http://" + "a" * 56 + ".onion"
+        u2 = "http://" + "b" * 56 + ".onion"
+        u3 = "http://" + "c" * 56 + ".onion"
+        u_haystak = ["http://" + chr(ord('d') + i) * 56 + ".onion" for i in range(12)]
+
+        called_order = []
+
+        def mock_tor66(proxy_url=None, allow_clearnet=False):
+            called_order.append("tor66")
+            return set()  # 0 seeds: triggers fallback
+
+        def mock_deepsearch(proxy_url=None, allow_clearnet=False):
+            called_order.append("deepsearch")
+            return {u1, u2, u3}  # 3 seeds (< 10 threshold): triggers fallback
+
+        def mock_haystak(proxy_url=None, allow_clearnet=False):
+            called_order.append("haystak")
+            return set(u_haystak)  # 12 seeds: sufficient yield
+
+        mgr.fetch_tor66 = mock_tor66
+        mgr.fetch_deepsearch = mock_deepsearch
+        mgr.fetch_haystak = mock_haystak
+
+        proxy = "socks5h://127.0.0.1:9050"
+        all_seeds, counts = mgr.fetch_all(
+            proxy_url=proxy,
+            allow_clearnet=False,
+            selected_sources=["deepsearch", "tor66", "haystak"],  # Out of order input
+            min_yield_threshold=10,
+        )
+
+        # Verified strict priority order: 1. Tor66 -> 2. DeepSearch -> 3. Haystak
+        assert called_order == ["tor66", "deepsearch", "haystak"]
+        assert counts["tor66"] == 0
+        assert counts["deepsearch"] == 3
+        assert counts["haystak"] == 12
+        assert len(all_seeds) == 15
+
+
+def test_new_source_fetchers_and_delegation():
+    fetcher = OnionFetcher()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = "http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"
+
+    with patch("requests.get", return_value=mock_resp):
+        proxy = "socks5h://127.0.0.1:9050"
+        haystak_res = fetcher.fetch_haystak_seeds(proxy_url=proxy, allow_clearnet=False)
+        assert len(haystak_res) >= 1
+
+        onionland_res = fetcher.fetch_onionland_seeds(proxy_url=proxy, allow_clearnet=False)
+        assert len(onionland_res) >= 1
+
+        torch_res = fetcher.fetch_torch_seeds(proxy_url=proxy, allow_clearnet=False)
+        assert len(torch_res) >= 1
+
+        notevil_res = fetcher.fetch_notevil_seeds(proxy_url=proxy, allow_clearnet=False)
+        assert len(notevil_res) >= 1
+
+
 def test_seed_ui_dialog_and_periodic_updater():
     import tkinter as tk
     from onion_search.ui.main_window import MainWindow

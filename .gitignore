@@ -1,8 +1,47 @@
-node_modules/
+# Bytecode és Python gyorsítótár
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtuális környezetek
+.venv/
+venv/
+env/
+ENV/
+
+# Pytest, lefedettség és teszt gyorsítótár
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Build, disztribúció és csomagok
 build/
 dist/
-coverage/
-.DS_Store
-*.log
-.env*
+*.egg-info/
+*.egg
+.eggs/
+
+# Környezeti és titkos változó fájlok
+.env
+.env.*
 !.env.example
+
+# Fejlesztői környezetek (IDE) és operációs rendszer fájlok
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Node.js és frontend függőségek / kimenetek
+node_modules/
+coverage/
+
+# Naplófájlok és ideiglenes fájlok
+*.log

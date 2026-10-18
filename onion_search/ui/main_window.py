@@ -126,9 +126,11 @@ class MainWindow:
         self.allow_clearnet_var = tk.BooleanVar(value=cfg.allow_clearnet)
         self.encrypt_storage_var = tk.BooleanVar(value=cfg.encrypt_storage)
         self.auto_seed_var = tk.BooleanVar(value=getattr(cfg, "auto_update_seeds", True))
-        self.status_var = tk.StringVar(value="Készen - v4.9 seeds")
+        self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
+        self.status_var = tk.StringVar(value="Készen - v4.9.4")
 
         # Build UI layout
+        self.setup_menu()
         self.setup_ui()
         self.apply_theme()
 
@@ -387,10 +389,193 @@ class MainWindow:
                 encrypt_storage=self.encrypt_storage_var.get(),
                 auto_update_seeds=self.auto_seed_var.get(),
                 queries=self.query_entry.get(),
+                normalize_to_host_only=self.host_only_var.get(),
             )
             self.config_manager.save(cfg)
         except Exception:
             pass
+
+    def setup_menu(self) -> None:
+        """Build classical main menubar for clean UX."""
+        menubar = tk.Menu(self.root)
+
+        # 1. Fájl menü
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="💾 Állapot mentése (Ctrl+S)", command=lambda: self.save_state(silent=False))
+        file_menu.add_command(label="📂 Állapot betöltése", command=lambda: self.load_state(silent=False))
+        file_menu.add_command(label="📦 Exportálás...", command=self.open_export_dialog)
+        file_menu.add_command(label="🗑 Állapot törlése", command=self.clear_state)
+        file_menu.add_separator()
+        file_menu.add_command(label="🔍 SQL Lekérdezés...", command=self.open_sql_query)
+        file_menu.add_separator()
+        file_menu.add_command(label="🚨 PÁNIK TÖRLÉS (Ctrl+Shift+Del)", command=self.panic_wipe)
+        file_menu.add_separator()
+        file_menu.add_command(label="Kilépés", command=self.on_close)
+        menubar.add_cascade(label="Fájl", menu=file_menu)
+
+        # 2. Keresés menü
+        search_menu = tk.Menu(menubar, tearoff=0)
+        search_menu.add_command(label="🌱 Magok frissítése", command=lambda: self.update_seeds_thread())
+        search_menu.add_command(label="⚙️ Maglista kezelő...", command=self.open_seeds_dialog)
+        search_menu.add_command(label="➕ Extra .onion címek...", command=self.open_extra_onions_dialog)
+        search_menu.add_separator()
+        search_menu.add_command(label="🔄 NEWNYM most (Ctrl+N)", command=self.manual_newnym_thread)
+        menubar.add_cascade(label="Keresés", menu=search_menu)
+
+        # 3. Beállítások menü
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        settings_menu.add_command(label="🌐 Tor és Hálózat...", command=self.open_network_settings_dialog)
+        settings_menu.add_command(label="💾 Tárolás & Adatbázis...", command=self.open_storage_settings_dialog)
+        settings_menu.add_command(label="🔄 NEWNYM automatizálás...", command=self.open_newnym_settings_dialog)
+        settings_menu.add_separator()
+        settings_menu.add_checkbutton(
+            label="URL-ek csak gazdagép szinten (Host-only)",
+            variable=self.host_only_var,
+            command=self.save_current_config,
+        )
+        menubar.add_cascade(label="Beállítások", menu=settings_menu)
+
+        # 4. Nézet menü
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_command(label="☀️/🌙 Sötét / Világos téma váltása", command=self.toggle_theme)
+        menubar.add_cascade(label="Nézet", menu=view_menu)
+
+        # 5. Súgó menü
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="⌨ Gyorsbillentyűk", command=self.open_shortcuts_dialog)
+        help_menu.add_separator()
+        help_menu.add_command(label="ℹ️ Névjegy & Licenc", command=self.open_about_dialog)
+        menubar.add_cascade(label="Súgó", menu=help_menu)
+
+        self.root.config(menu=menubar)
+
+    def open_extra_onions_dialog(self) -> None:
+        """Modal dialog for editing extra .onion target addresses."""
+        win = tk.Toplevel(self.root)
+        win.title("➕ Extra .onion Címek Megadása")
+        win.geometry("520x360")
+
+        ttk.Label(win, text="Adjon meg további .onion URL-eket (soronként egyet):", font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, padx=12, pady=(12, 4))
+        txt = scrolledtext.ScrolledText(win, height=12)
+        txt.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        txt.insert("1.0", self.extra_text.get("1.0", tk.END))
+
+        def _save():
+            self.extra_text.delete("1.0", tk.END)
+            self.extra_text.insert("1.0", txt.get("1.0", tk.END))
+            win.destroy()
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=12, pady=(4, 12))
+        ttk.Button(btn_row, text="Mentés", command=_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_network_settings_dialog(self) -> None:
+        """Modal dialog for Tor network and proxy settings."""
+        win = tk.Toplevel(self.root)
+        win.title("🌐 Tor és Hálózat Beállítások")
+        win.geometry("450x300")
+        win.resizable(False, False)
+
+        ttk.Label(win, text="Tor Proxy Beállítások", font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=16, pady=(12, 4))
+
+        f = ttk.Frame(win, padding=12)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(f, text="SOCKS Port:").grid(row=0, column=0, sticky=tk.W, pady=4)
+        ttk.Combobox(f, textvariable=self.port_var, values=["9050", "9150"], width=8).grid(row=0, column=1, sticky=tk.W, pady=4)
+
+        ttk.Label(f, text="Control Port:").grid(row=1, column=0, sticky=tk.W, pady=4)
+        ttk.Combobox(f, textvariable=self.ctrl_port_var, values=["9051", "9151"], width=8).grid(row=1, column=1, sticky=tk.W, pady=4)
+
+        ttk.Label(f, text="Szálak száma (Workers):").grid(row=2, column=0, sticky=tk.W, pady=4)
+        ttk.Spinbox(f, from_=2, to=10, textvariable=self.worker_var, width=6).grid(row=2, column=1, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(f, text="Clearnet elérés engedélyezve", variable=self.allow_clearnet_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=6)
+
+        def _save():
+            self.save_current_config()
+            win.destroy()
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=16, pady=(4, 12))
+        ttk.Button(btn_row, text="Mentés", command=_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_storage_settings_dialog(self) -> None:
+        """Modal dialog for database storage and encryption options."""
+        win = tk.Toplevel(self.root)
+        win.title("💾 Tárolás & Adatbázis Beállítások")
+        win.geometry("450x260")
+        win.resizable(False, False)
+
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(f, text="Adatbázis Tároló Engine:").grid(row=0, column=0, sticky=tk.W, pady=6)
+        combo = ttk.Combobox(f, textvariable=self.backend_var, values=["sqlite", "json"], width=10, state="readonly")
+        combo.grid(row=0, column=1, sticky=tk.W, pady=6)
+        combo.bind("<<ComboboxSelected>>", lambda e: self.on_backend_switch())
+
+        ttk.Checkbutton(f, text="Automatikus állapotmentés keresés végén", variable=self.auto_save_var).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=6)
+        ttk.Checkbutton(f, text="Adatbázis mentések titkosítása (AES/Fernet)", variable=self.encrypt_storage_var).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=6)
+
+        def _save():
+            self.save_current_config()
+            win.destroy()
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=16, pady=(4, 12))
+        ttk.Button(btn_row, text="Mentés", command=_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_newnym_settings_dialog(self) -> None:
+        """Modal dialog for automated Tor identity renewal settings."""
+        win = tk.Toplevel(self.root)
+        win.title("🔄 Tor NEWNYM Automatizálás")
+        win.geometry("460x280")
+        win.resizable(False, False)
+
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Checkbutton(f, text="NEWNYM kérése sikeres lekérdezések után:", variable=self.auto_newnym_success_var).grid(row=0, column=0, sticky=tk.W, pady=6)
+        ttk.Spinbox(f, from_=10, to=200, textvariable=self.success_threshold_var, width=6).grid(row=0, column=1, sticky=tk.W, pady=6)
+
+        ttk.Checkbutton(f, text="NEWNYM kérése összes lekérdezés után:", variable=self.auto_newnym_total_var).grid(row=1, column=0, sticky=tk.W, pady=6)
+        ttk.Spinbox(f, from_=20, to=500, textvariable=self.total_threshold_var, width=6).grid(row=1, column=1, sticky=tk.W, pady=6)
+
+        def _save():
+            self.save_current_config()
+            win.destroy()
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=16, pady=(4, 12))
+        ttk.Button(btn_row, text="Mentés", command=_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_shortcuts_dialog(self) -> None:
+        """Modal dialog displaying application keyboard shortcuts."""
+        win = tk.Toplevel(self.root)
+        win.title("⌨ Gyorsbillentyűk")
+        win.geometry("400x300")
+        win.resizable(False, False)
+
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        shortcuts = [
+            ("Ctrl + S", "Állapot mentése lemezre"),
+            ("Ctrl + N", "Új Tor identitás (NEWNYM) kérése"),
+            ("Ctrl + F", "Szűrők alkalmazása / frissítése"),
+            ("Ctrl + Shift + Del", "🚨 Pánik törlés (azonnali megsemmisítés)"),
+        ]
+
+        for idx, (key, desc) in enumerate(shortcuts):
+            ttk.Label(f, text=key, font=("Consolas", 9, "bold"), foreground="#2980b9").grid(row=idx, column=0, sticky=tk.W, pady=6, padx=(0, 12))
+            ttk.Label(f, text=desc).grid(row=idx, column=1, sticky=tk.W, pady=6)
+
+        ttk.Button(win, text="Rendben", command=win.destroy).pack(pady=(0, 12))
 
     def setup_ui(self) -> None:
         cfg = self.config_manager.config

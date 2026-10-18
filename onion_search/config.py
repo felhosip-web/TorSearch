@@ -23,7 +23,7 @@ from typing import Any, Dict
 
 # Application Metadata
 APP_NAME = "Onion Kereső"
-APP_VERSION = "4.9.3"
+APP_VERSION = "4.9.4"
 APP_AUTHOR = "HES Projects by FePe"
 APP_LICENSE = "Apache-2.0"
 APP_COPYRIGHT = "Copyright 2026 HES Projects by FePe"

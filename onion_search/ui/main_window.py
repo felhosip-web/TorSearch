@@ -415,13 +415,13 @@ class MainWindow:
             top, textvariable=self.ctrl_port_var, values=["9051", "9151"], width=5
         ).pack(side=tk.LEFT)
 
-        ttk.Label(top, text="Workers:").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(top, text="Szálak:").pack(side=tk.LEFT, padx=(4, 0))
         self.worker_var = tk.IntVar(value=cfg.workers)
         ttk.Spinbox(
             top, from_=2, to=10, textvariable=self.worker_var, width=3
         ).pack(side=tk.LEFT)
 
-        ttk.Label(top, text="Backend:").pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(top, text="Tároló:").pack(side=tk.LEFT, padx=(6, 0))
         self.backend_combo = ttk.Combobox(
             top,
             textvariable=self.backend_var,
@@ -434,7 +434,7 @@ class MainWindow:
             "<<ComboboxSelected>>", lambda e: self.on_backend_switch()
         )
 
-        ttk.Checkbutton(top, text="Clearnet", variable=self.allow_clearnet_var).pack(
+        ttk.Checkbutton(top, text="Clearnet engedélyezve", variable=self.allow_clearnet_var).pack(
             side=tk.LEFT, padx=3
         )
         ttk.Checkbutton(top, text="Titkosítva", variable=self.encrypt_storage_var).pack(
@@ -491,7 +491,7 @@ class MainWindow:
         )
         self.lbl_tor_status.pack(side=tk.LEFT)
         ttk.Button(
-            status_top, text="🔍 Auto-detect Tor", command=self.auto_detect_tor
+            status_top, text="🔍 Tor automatikus felismerés", command=self.auto_detect_tor
         ).pack(side=tk.LEFT, padx=10)
         ttk.Separator(status_top, orient="vertical").pack(
             side=tk.LEFT, fill=tk.Y, padx=12
@@ -533,7 +533,7 @@ class MainWindow:
         )
         self.lbl_newnym.pack(side=tk.LEFT, padx=4)
         ttk.Button(
-            newnym_frame, text="Reset", command=self.reset_counters, width=6
+            newnym_frame, text="Visszaállítás", command=self.reset_counters, width=11
         ).pack(side=tk.RIGHT)
 
         # 3. Filters panel component
@@ -563,15 +563,15 @@ class MainWindow:
         self.btn_seeds_cfg.pack(side=tk.LEFT, padx=(0, 2))
         self.btn_github = self.btn_seeds
         self.btn_start = ttk.Button(
-            btn, text="▶ Start", command=self.start_thread
+            btn, text="▶ Indítás", command=self.start_thread
         )
         self.btn_start.pack(side=tk.LEFT, padx=2)
         self.btn_resume = ttk.Button(
-            btn, text="⏩ Folytatás (Resume)", command=self.resume_thread, state=tk.DISABLED
+            btn, text="⏩ Folytatás", command=self.resume_thread, state=tk.DISABLED
         )
         self.btn_resume.pack(side=tk.LEFT, padx=2)
         self.btn_stop = ttk.Button(
-            btn, text="⏹ Stop", command=self.stop, state=tk.DISABLED
+            btn, text="⏹ Leállítás", command=self.stop, state=tk.DISABLED
         )
         self.btn_stop.pack(side=tk.LEFT, padx=2)
         self.btn_newnym = ttk.Button(
@@ -582,7 +582,7 @@ class MainWindow:
             btn, text="Auto-mentés", variable=self.auto_save_var
         ).pack(side=tk.LEFT, padx=4)
         ttk.Checkbutton(
-            btn, text="Auto-seed", variable=self.auto_seed_var
+            btn, text="Auto-mag", variable=self.auto_seed_var
         ).pack(side=tk.LEFT, padx=3)
 
         ttk.Label(left, text="Extra .onionok:").pack(anchor=tk.W)
@@ -772,7 +772,7 @@ class MainWindow:
         tr.pack(fill=tk.X)
         ttk.Label(tr, text="Egyedi találatok:").pack(side=tk.LEFT)
         self.lbl_backend = ttk.Label(
-            tr, text="Backend: sqlite", foreground="purple", font=("TkDefaultFont", 7)
+            tr, text="Tároló: sqlite", foreground="purple", font=("TkDefaultFont", 7)
         )
         self.lbl_backend.pack(side=tk.RIGHT)
 
@@ -800,8 +800,8 @@ class MainWindow:
         self.tree.heading("url", text=".onion")
         self.tree.heading("lang", text="Nyelv")
         self.tree.heading("category", text="Kat.")
-        self.tree.heading("last_check", text="Utolsó check")
-        self.tree.heading("info", text="Snippet")
+        self.tree.heading("last_check", text="Utolsó ellenőrzés")
+        self.tree.heading("info", text="Részlet")
 
         self.tree.column("title", width=150)
         self.tree.column("url", width=210)
@@ -1115,7 +1115,7 @@ class MainWindow:
 
     def on_backend_switch(self) -> None:
         backend: str = self.backend_var.get()
-        self.lbl_backend.config(text=f"Backend: {backend}")
+        self.lbl_backend.config(text=f"Tároló: {backend}")
         self.log_msg(f"[BACKEND] Váltás: {backend}", force=True, tag="save")
         self.load_state(silent=False)
         self.load_deadlist()
@@ -1561,7 +1561,7 @@ class MainWindow:
             self.lbl_unique.config(text=f"{len(self.results)}")
             self.lbl_checked.config(text=f"{len(self.checked_urls)}")
             self.lbl_newnym.config(text=f"NEWNYM: {self.total_newnym}")
-            self.lbl_backend.config(text=f"Backend: {self.backend_var.get()}")
+            self.lbl_backend.config(text=f"Tároló: {self.backend_var.get()}")
             self.update_counts_label()
             self.filters_panel.set_counts(
                 len(self.results), len(self.results), 0
@@ -1603,7 +1603,7 @@ class MainWindow:
 
     def clear_state(self) -> None:
         if messagebox.askyesno(
-            "Törlés", f"Minden mentés törlése? Backend: {self.backend_var.get()}"
+            "Törlés", f"Minden mentés törlése? Tároló: {self.backend_var.get()}"
         ):
             self.get_backend().clear()
             with self.lock:
@@ -2644,6 +2644,80 @@ class MainWindow:
         self.root.after(0, _setup_ui)
 
         completed = 0
+        ui_batch_items: List[Dict[str, Any]] = []
+
+        def _flush_ui(comp: int):
+            with self.lock:
+                batch = list(ui_batch_items)
+                ui_batch_items.clear()
+
+            pct = int(comp / total * 100) if total else 0
+            elapsed = time.time() - self.start_time if self.start_time else 1
+            speed = comp / elapsed if elapsed > 0 else 0
+            self.progress.config(value=comp)
+            self.lbl_percent.config(text=f"{pct}%")
+            self.lbl_speed.config(text=f"{speed:.1f} req/s | {comp}/{total}")
+
+            with self.lock:
+                total_s = self.stats.get("total", 0)
+                alive_s = self.stats.get("alive", 0)
+                dead_s = self.stats.get("dead", 0)
+                clone_s = self.stats.get("clone", 0)
+                filt_s = self.stats.get("filtered", 0)
+                checked_len = len(self.checked_urls)
+                results_len = len(self.results)
+            self.lbl_total.config(text=f"{total_s}")
+            self.lbl_checked.config(text=f"{checked_len}")
+            self.lbl_alive.config(text=f"{alive_s}")
+            self.lbl_dead.config(text=f"{dead_s}")
+            self.lbl_clone.config(text=f"{clone_s}")
+            self.lbl_unique.config(text=f"{results_len}")
+            self.lbl_filtered.config(text=f"{filt_s}")
+
+            for item in batch:
+                if item["status"] == "unique":
+                    ts_str = fmt_ts(item.get("ts"))
+                    visible, _ = self.filters_panel.is_item_visible(item)
+                    if visible:
+                        tags = []
+                        l = item.get("lang", "en")
+                        if l in ("hu", "en", "de", "ru", "fr"):
+                            tags.append(f"lang_{l}")
+                        if item.get("category") == "forum":
+                            tags.append("cat_forum")
+                        self.tree.insert(
+                            "",
+                            tk.END,
+                            values=(
+                                item["title"],
+                                item["url"],
+                                item.get("lang", ""),
+                                item.get("category", ""),
+                                ts_str,
+                                item["snippet"],
+                            ),
+                            tags=tuple(tags),
+                        )
+                    self.log_msg(
+                        f"[OK] {item['title']} [{item.get('lang','')}/{item.get('category','')}] - {item['url'][:50]}",
+                        tag="ok",
+                    )
+                elif item["status"] == "filtered":
+                    self.log_msg(
+                        f"[PRECISE FILTER] {item['url'][:60]} -> {item.get('reason','')}",
+                        tag="filter",
+                    )
+                elif "clone" in item["status"]:
+                    self.log_msg(f"[CLONE] {item['url'][:60]}", tag="clone")
+                else:
+                    if item["status"] == "dead":
+                        self.log_msg(
+                            f"[-] HALOTT: {item['url'][:60]} ({item.get('code','')})",
+                            tag="dead",
+                        )
+
+            if comp % 25 == 0 and auto_save:
+                self.save_incremental_pending()
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
@@ -2665,6 +2739,7 @@ class MainWindow:
                 with self.lock:
                     if url_finished in self.pending_queue:
                         self.pending_queue.remove(url_finished)
+                    ui_batch_items.append(res)
 
                 is_success = res["status"] in ("unique", "clone", "clone_btc")
                 with self.lock:
@@ -2682,81 +2757,11 @@ class MainWindow:
 
                 self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
 
-                def _update(res=res, comp=completed):
-                    pct = int(comp / total * 100) if total else 0
-                    elapsed = (
-                        time.time() - self.start_time if self.start_time else 1
-                    )
-                    speed = comp / elapsed if elapsed > 0 else 0
-                    self.progress.config(value=comp)
-                    self.lbl_percent.config(text=f"{pct}%")
-                    self.lbl_speed.config(
-                        text=f"{speed:.1f} req/s | {comp}/{total}"
-                    )
-                    with self.lock:
-                        total_s = self.stats.get("total", 0)
-                        alive_s = self.stats.get("alive", 0)
-                        dead_s = self.stats.get("dead", 0)
-                        clone_s = self.stats.get("clone", 0)
-                        filt_s = self.stats.get("filtered", 0)
-                        checked_len = len(self.checked_urls)
-                        results_len = len(self.results)
-                    self.lbl_total.config(text=f"{total_s}")
-                    self.lbl_checked.config(text=f"{checked_len}")
-                    self.lbl_alive.config(text=f"{alive_s}")
-                    self.lbl_dead.config(text=f"{dead_s}")
-                    self.lbl_clone.config(text=f"{clone_s}")
-                    self.lbl_unique.config(text=f"{results_len}")
-                    self.lbl_filtered.config(text=f"{filt_s}")
-
-                    if res["status"] == "unique":
-                        ts_str = fmt_ts(res.get("ts"))
-                        visible, _ = self.filters_panel.is_item_visible(res)
-                        if visible:
-                            tags = []
-                            l = res.get("lang", "en")
-                            if l in ("hu", "en", "de", "ru", "fr"):
-                                tags.append(f"lang_{l}")
-                            if res.get("category") == "forum":
-                                tags.append("cat_forum")
-                            self.tree.insert(
-                                "",
-                                tk.END,
-                                values=(
-                                    res["title"],
-                                    res["url"],
-                                    res.get("lang", ""),
-                                    res.get("category", ""),
-                                    ts_str,
-                                    res["snippet"],
-                                ),
-                                tags=tuple(tags),
-                            )
-                        self.log_msg(
-                            f"[OK] {res['title']} [{res.get('lang','')}/{res.get('category','')}] - {res['url'][:50]}",
-                            tag="ok",
-                        )
-                    elif res["status"] == "filtered":
-                        self.log_msg(
-                            f"[PRECISE FILTER] {res['url'][:60]} -> {res.get('reason','')}",
-                            tag="filter",
-                        )
-                    elif "clone" in res["status"]:
-                        self.log_msg(f"[CLONE] {res['url'][:60]}", tag="clone")
-                    else:
-                        if res["status"] == "dead":
-                            self.log_msg(
-                                f"[-] HALOTT: {res['url'][:60]} ({res.get('code','')})",
-                                tag="dead",
-                            )
-                    if comp % 25 == 0 and auto_save:
-                        self.save_incremental_pending()
-
-                # Batch UI updates: frissítsünk minden 5. találatnál VAGY ha legalább 300 ms eltelt VAGY az utolsó elemről van szó
                 now_t = time.time()
-                if comp % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or comp == total:
+                if completed % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or completed == total:
                     self._last_ui_update_ts = now_t
-                    self.root.after(0, _update)
+                    c_snap = completed
+                    self.root.after(0, lambda c=c_snap: _flush_ui(c))
 
         with self.lock:
             self.in_progress_urls.clear()

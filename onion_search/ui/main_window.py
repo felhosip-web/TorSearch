@@ -55,7 +55,7 @@ from onion_search.storage.json_backend import JSONBackend
 from onion_search.storage.sqlite_backend import SQLiteBackend
 from onion_search.ui.filters import FilterPanel
 from onion_search.ui.log_panel import LogPanel, logger
-from onion_search.utils.helpers import fmt_ts, parse_list
+from onion_search.utils.helpers import fmt_ts, parse_list, normalize_onion_url
 
 
 class MainWindow:
@@ -96,6 +96,7 @@ class MainWindow:
         self.pending_queue: List[str] = []  # Remaining unvisited URLs for clean resume
         self.dead_blacklist: Dict[str, float] = {}
         self.results: List[Dict[str, Any]] = []
+        self.result_urls: Set[str] = set()
         self.running: bool = False
         self.lock: threading.Lock = threading.Lock()
         self.stats: Dict[str, int] = {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0}
@@ -125,9 +126,11 @@ class MainWindow:
         self.allow_clearnet_var = tk.BooleanVar(value=cfg.allow_clearnet)
         self.encrypt_storage_var = tk.BooleanVar(value=cfg.encrypt_storage)
         self.auto_seed_var = tk.BooleanVar(value=getattr(cfg, "auto_update_seeds", True))
-        self.status_var = tk.StringVar(value="Készen - v4.9 seeds")
+        self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
+        self.status_var = tk.StringVar(value="Készen - v4.9.4")
 
         # Build UI layout
+        self.setup_menu()
         self.setup_ui()
         self.apply_theme()
 
@@ -386,207 +389,274 @@ class MainWindow:
                 encrypt_storage=self.encrypt_storage_var.get(),
                 auto_update_seeds=self.auto_seed_var.get(),
                 queries=self.query_entry.get(),
+                normalize_to_host_only=self.host_only_var.get(),
             )
             self.config_manager.save(cfg)
         except Exception:
             pass
 
+    def setup_menu(self) -> None:
+        """Build classical main menubar for clean UX."""
+        menubar = tk.Menu(self.root)
+
+        # 1. Fájl menü
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="💾 Állapot mentése (Ctrl+S)", command=lambda: self.save_state(silent=False))
+        file_menu.add_command(label="📂 Állapot betöltése", command=lambda: self.load_state(silent=False))
+        file_menu.add_command(label="📦 Exportálás...", command=self.open_export_dialog)
+        file_menu.add_command(label="🗑 Állapot törlése", command=self.clear_state)
+        file_menu.add_separator()
+        file_menu.add_command(label="🔍 SQL Lekérdezés...", command=self.open_sql_query)
+        file_menu.add_separator()
+        file_menu.add_command(label="🚨 PÁNIK TÖRLÉS (Ctrl+Shift+Del)", command=self.panic_wipe)
+        file_menu.add_separator()
+        file_menu.add_command(label="Kilépés", command=self.on_close)
+        menubar.add_cascade(label="Fájl", menu=file_menu)
+
+        # 2. Keresés menü
+        search_menu = tk.Menu(menubar, tearoff=0)
+        search_menu.add_command(label="🌱 Magok frissítése", command=lambda: self.update_seeds_thread())
+        search_menu.add_command(label="⚙️ Maglista kezelő...", command=self.open_seeds_dialog)
+        search_menu.add_command(label="➕ Extra .onion címek...", command=self.open_extra_onions_dialog)
+        search_menu.add_separator()
+        search_menu.add_command(label="🔄 NEWNYM most (Ctrl+N)", command=self.manual_newnym_thread)
+        menubar.add_cascade(label="Keresés", menu=search_menu)
+
+        # 3. Beállítások menü
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        settings_menu.add_command(label="🌐 Tor és Hálózat...", command=self.open_network_settings_dialog)
+        settings_menu.add_command(label="💾 Tárolás & Adatbázis...", command=self.open_storage_settings_dialog)
+        settings_menu.add_command(label="🔄 NEWNYM automatizálás...", command=self.open_newnym_settings_dialog)
+        settings_menu.add_separator()
+        settings_menu.add_checkbutton(
+            label="URL-ek csak gazdagép szinten (Host-only)",
+            variable=self.host_only_var,
+            command=self.save_current_config,
+        )
+        menubar.add_cascade(label="Beállítások", menu=settings_menu)
+
+        # 4. Nézet menü
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_command(label="☀️/🌙 Sötét / Világos téma váltása", command=self.toggle_theme)
+        menubar.add_cascade(label="Nézet", menu=view_menu)
+
+        # 5. Súgó menü
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="⌨ Gyorsbillentyűk", command=self.open_shortcuts_dialog)
+        help_menu.add_separator()
+        help_menu.add_command(label="ℹ️ Névjegy & Licenc", command=self.open_about_dialog)
+        menubar.add_cascade(label="Súgó", menu=help_menu)
+
+        self.root.config(menu=menubar)
+
+    def open_extra_onions_dialog(self) -> None:
+        """Modal dialog for editing extra .onion target addresses."""
+        win = tk.Toplevel(self.root)
+        win.title("➕ Extra .onion Címek Megadása")
+        win.geometry("520x360")
+
+        ttk.Label(win, text="Adjon meg további .onion URL-eket (soronként egyet):", font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, padx=12, pady=(12, 4))
+        txt = scrolledtext.ScrolledText(win, height=12)
+        txt.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        txt.insert("1.0", self.extra_text.get("1.0", tk.END))
+
+        def _save():
+            self.extra_text.delete("1.0", tk.END)
+            self.extra_text.insert("1.0", txt.get("1.0", tk.END))
+            win.destroy()
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=12, pady=(4, 12))
+        ttk.Button(btn_row, text="Mentés", command=_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_network_settings_dialog(self) -> None:
+        """Modal dialog for Tor network and proxy settings."""
+        win = tk.Toplevel(self.root)
+        win.title("🌐 Tor és Hálózat Beállítások")
+        win.geometry("450x300")
+        win.resizable(False, False)
+
+        ttk.Label(win, text="Tor Proxy Beállítások", font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=16, pady=(12, 4))
+
+        f = ttk.Frame(win, padding=12)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(f, text="SOCKS Port:").grid(row=0, column=0, sticky=tk.W, pady=4)
+        ttk.Combobox(f, textvariable=self.port_var, values=["9050", "9150"], width=8).grid(row=0, column=1, sticky=tk.W, pady=4)
+
+        ttk.Label(f, text="Control Port:").grid(row=1, column=0, sticky=tk.W, pady=4)
+        ttk.Combobox(f, textvariable=self.ctrl_port_var, values=["9051", "9151"], width=8).grid(row=1, column=1, sticky=tk.W, pady=4)
+
+        ttk.Label(f, text="Szálak száma (Workers):").grid(row=2, column=0, sticky=tk.W, pady=4)
+        ttk.Spinbox(f, from_=2, to=10, textvariable=self.worker_var, width=6).grid(row=2, column=1, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(f, text="Clearnet elérés engedélyezve", variable=self.allow_clearnet_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=6)
+
+        def _save():
+            self.save_current_config()
+            win.destroy()
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=16, pady=(4, 12))
+        ttk.Button(btn_row, text="Mentés", command=_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_storage_settings_dialog(self) -> None:
+        """Modal dialog for database storage and encryption options."""
+        win = tk.Toplevel(self.root)
+        win.title("💾 Tárolás & Adatbázis Beállítások")
+        win.geometry("450x260")
+        win.resizable(False, False)
+
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(f, text="Adatbázis Tároló Engine:").grid(row=0, column=0, sticky=tk.W, pady=6)
+        combo = ttk.Combobox(f, textvariable=self.backend_var, values=["sqlite", "json"], width=10, state="readonly")
+        combo.grid(row=0, column=1, sticky=tk.W, pady=6)
+        combo.bind("<<ComboboxSelected>>", lambda e: self.on_backend_switch())
+
+        ttk.Checkbutton(f, text="Automatikus állapotmentés keresés végén", variable=self.auto_save_var).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=6)
+        ttk.Checkbutton(f, text="Adatbázis mentések titkosítása (AES/Fernet)", variable=self.encrypt_storage_var).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=6)
+
+        def _save():
+            self.save_current_config()
+            win.destroy()
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=16, pady=(4, 12))
+        ttk.Button(btn_row, text="Mentés", command=_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_newnym_settings_dialog(self) -> None:
+        """Modal dialog for automated Tor identity renewal settings."""
+        win = tk.Toplevel(self.root)
+        win.title("🔄 Tor NEWNYM Automatizálás")
+        win.geometry("460x280")
+        win.resizable(False, False)
+
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Checkbutton(f, text="NEWNYM kérése sikeres lekérdezések után:", variable=self.auto_newnym_success_var).grid(row=0, column=0, sticky=tk.W, pady=6)
+        ttk.Spinbox(f, from_=10, to=200, textvariable=self.success_threshold_var, width=6).grid(row=0, column=1, sticky=tk.W, pady=6)
+
+        ttk.Checkbutton(f, text="NEWNYM kérése összes lekérdezés után:", variable=self.auto_newnym_total_var).grid(row=1, column=0, sticky=tk.W, pady=6)
+        ttk.Spinbox(f, from_=20, to=500, textvariable=self.total_threshold_var, width=6).grid(row=1, column=1, sticky=tk.W, pady=6)
+
+        def _save():
+            self.save_current_config()
+            win.destroy()
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=16, pady=(4, 12))
+        ttk.Button(btn_row, text="Mentés", command=_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Mégse", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_shortcuts_dialog(self) -> None:
+        """Modal dialog displaying application keyboard shortcuts."""
+        win = tk.Toplevel(self.root)
+        win.title("⌨ Gyorsbillentyűk")
+        win.geometry("400x300")
+        win.resizable(False, False)
+
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        shortcuts = [
+            ("Ctrl + S", "Állapot mentése lemezre"),
+            ("Ctrl + N", "Új Tor identitás (NEWNYM) kérése"),
+            ("Ctrl + F", "Szűrők alkalmazása / frissítése"),
+            ("Ctrl + Shift + Del", "🚨 Pánik törlés (azonnali megsemmisítés)"),
+        ]
+
+        for idx, (key, desc) in enumerate(shortcuts):
+            ttk.Label(f, text=key, font=("Consolas", 9, "bold"), foreground="#2980b9").grid(row=idx, column=0, sticky=tk.W, pady=6, padx=(0, 12))
+            ttk.Label(f, text=desc).grid(row=idx, column=1, sticky=tk.W, pady=6)
+
+        ttk.Button(win, text="Rendben", command=win.destroy).pack(pady=(0, 12))
+
     def setup_ui(self) -> None:
         cfg = self.config_manager.config
 
-        # 1. Top toolbar
-        top = ttk.Frame(self.root, padding=8)
-        top.pack(fill=tk.X)
-        ttk.Label(top, text="Ahmia szavak:").pack(side=tk.LEFT)
-        self.query_entry = ttk.Entry(top, width=18)
-        self.query_entry.insert(0, cfg.queries)
-        self.query_entry.pack(side=tk.LEFT, padx=3)
-
-        ttk.Label(top, text="Tor:").pack(side=tk.LEFT, padx=(4, 0))
+        # Unpacked variables & widget handles maintained in memory for dialogs and backend logic
         self.port_var = tk.StringVar(value=cfg.socks_port)
-        ttk.Combobox(
-            top, textvariable=self.port_var, values=["9050", "9150"], width=5
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(top, text="Ctrl:").pack(side=tk.LEFT, padx=(4, 0))
         self.ctrl_port_var = tk.StringVar(value=cfg.ctrl_port)
-        ttk.Combobox(
-            top, textvariable=self.ctrl_port_var, values=["9051", "9151"], width=5
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(top, text="Workers:").pack(side=tk.LEFT, padx=(4, 0))
         self.worker_var = tk.IntVar(value=cfg.workers)
-        ttk.Spinbox(
-            top, from_=2, to=10, textvariable=self.worker_var, width=3
-        ).pack(side=tk.LEFT)
+        self.backend_combo = ttk.Combobox(self.root, textvariable=self.backend_var, values=["sqlite", "json"])
+        self.backend_combo.bind("<<ComboboxSelected>>", lambda e: self.on_backend_switch())
+        self.lbl_counts = ttk.Label(self.root, text="")
+        self.lbl_newnym = ttk.Label(self.root, text="")
+        self.extra_text = scrolledtext.ScrolledText(self.root, height=1)
+        self.btn_theme = ttk.Button(self.root)
 
-        ttk.Label(top, text="Backend:").pack(side=tk.LEFT, padx=(6, 0))
-        self.backend_combo = ttk.Combobox(
-            top,
-            textvariable=self.backend_var,
-            values=["sqlite", "json"],
-            width=6,
-            state="readonly",
-        )
-        self.backend_combo.pack(side=tk.LEFT)
-        self.backend_combo.bind(
-            "<<ComboboxSelected>>", lambda e: self.on_backend_switch()
-        )
+        # 1. Clean Top Search Header Toolbar
+        top = ttk.Frame(self.root, padding=6)
+        top.pack(fill=tk.X)
 
-        ttk.Checkbutton(top, text="Clearnet", variable=self.allow_clearnet_var).pack(
-            side=tk.LEFT, padx=3
-        )
-        ttk.Checkbutton(top, text="Titkosítva", variable=self.encrypt_storage_var).pack(
-            side=tk.LEFT, padx=3
-        )
+        ttk.Label(top, text="Ahmia szavak:", font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT, padx=(4, 2))
+        self.query_entry = ttk.Entry(top, width=28)
+        self.query_entry.insert(0, cfg.queries)
+        self.query_entry.pack(side=tk.LEFT, padx=4)
 
-        persist = ttk.Frame(top)
-        persist.pack(side=tk.RIGHT)
-        self.btn_panic = ttk.Button(
-            persist, text="🚨 PÁNIK (Ctrl+Shift+Del)", command=self.panic_wipe
+        self.btn_start = ttk.Button(
+            top, text="▶ Indítás", command=self.start_thread
         )
-        self.btn_panic.pack(side=tk.LEFT, padx=3)
-        self.btn_theme = ttk.Button(
-            persist, text="🌙 Sötét mód", command=self.toggle_theme
+        self.btn_start.pack(side=tk.LEFT, padx=3)
+        self.btn_resume = ttk.Button(
+            top, text="⏩ Folytatás", command=self.resume_thread, state=tk.DISABLED
         )
-        self.btn_theme.pack(side=tk.LEFT, padx=2)
+        self.btn_resume.pack(side=tk.LEFT, padx=3)
+        self.btn_stop = ttk.Button(
+            top, text="⏹ Leállítás", command=self.stop, state=tk.DISABLED
+        )
+        self.btn_stop.pack(side=tk.LEFT, padx=3)
 
-        ttk.Button(
-            persist, text="💾", width=3, command=lambda: self.save_state(silent=False)
-        ).pack(side=tk.LEFT, padx=1)
-        ttk.Button(
-            persist, text="📂", width=3, command=lambda: self.load_state()
-        ).pack(side=tk.LEFT, padx=1)
-        ttk.Button(persist, text="🗑", width=3, command=self.clear_state).pack(
-            side=tk.LEFT, padx=1
+        self.btn_seeds = ttk.Button(
+            top, text="🌱 Magok", command=self.update_seeds_thread
         )
-        ttk.Button(
-            persist, text="ℹ️ Licenc", command=self.open_about_dialog
-        ).pack(side=tk.LEFT, padx=2)
+        self.btn_seeds.pack(side=tk.LEFT, padx=(10, 2))
+        self.btn_seeds.bind("<Button-3>", lambda e: self.open_seeds_dialog())
+        self.btn_seeds_cfg = ttk.Button(
+            top, text="⚙️", width=3, command=self.open_seeds_dialog
+        )
+        self.btn_seeds_cfg.pack(side=tk.LEFT, padx=2)
+        self.btn_github = self.btn_seeds
 
-        # 2. Status & NEWNYM toolbar
-        status_top = ttk.Frame(self.root, padding=(8, 2))
-        status_top.pack(fill=tk.X)
-        self.canvas_socks = tk.Canvas(
-            status_top, width=16, height=16, highlightthickness=0
-        )
-        self.canvas_socks.pack(side=tk.LEFT)
-        self.led_socks = self.canvas_socks.create_oval(
-            2, 2, 14, 14, fill="gray", outline=""
-        )
-        ttk.Label(status_top, text="SOCKS").pack(side=tk.LEFT, padx=(2, 8))
+        # Tor Status Indicators
+        status_right = ttk.Frame(top)
+        status_right.pack(side=tk.RIGHT, padx=6)
+        self.canvas_socks = tk.Canvas(status_right, width=12, height=12, highlightthickness=0)
+        self.canvas_socks.pack(side=tk.LEFT, padx=2)
+        self.led_socks = self.canvas_socks.create_oval(1, 1, 11, 11, fill="gray", outline="")
 
-        self.canvas_ctrl = tk.Canvas(
-            status_top, width=16, height=16, highlightthickness=0
-        )
-        self.canvas_ctrl.pack(side=tk.LEFT)
-        self.led_ctrl = self.canvas_ctrl.create_oval(
-            2, 2, 14, 14, fill="gray", outline=""
-        )
-        ttk.Label(status_top, text="CTRL").pack(side=tk.LEFT, padx=(2, 12))
+        self.canvas_ctrl = tk.Canvas(status_right, width=12, height=12, highlightthickness=0)
+        self.canvas_ctrl.pack(side=tk.LEFT, padx=2)
+        self.led_ctrl = self.canvas_ctrl.create_oval(1, 1, 11, 11, fill="gray", outline="")
 
         self.lbl_tor_status = ttk.Label(
-            status_top, text="Tor: ellenőrzés...", foreground="gray"
+            status_right, text="Tor: ellenőrzés...", foreground="gray", font=("TkDefaultFont", 8)
         )
-        self.lbl_tor_status.pack(side=tk.LEFT)
-        ttk.Button(
-            status_top, text="🔍 Auto-detect Tor", command=self.auto_detect_tor
-        ).pack(side=tk.LEFT, padx=10)
-        ttk.Separator(status_top, orient="vertical").pack(
-            side=tk.LEFT, fill=tk.Y, padx=12
-        )
+        self.lbl_tor_status.pack(side=tk.LEFT, padx=4)
 
-        newnym_frame = ttk.LabelFrame(status_top, text="NEWNYM", padding=2)
-        newnym_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Checkbutton(
-            newnym_frame, text="Sikeresenként:", variable=self.auto_newnym_success_var
-        ).pack(side=tk.LEFT)
-        ttk.Spinbox(
-            newnym_frame,
-            from_=10,
-            to=200,
-            textvariable=self.success_threshold_var,
-            width=5,
-        ).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(
-            newnym_frame, text="Összes:", variable=self.auto_newnym_total_var
-        ).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Spinbox(
-            newnym_frame,
-            from_=20,
-            to=500,
-            textvariable=self.total_threshold_var,
-            width=5,
-        ).pack(side=tk.LEFT, padx=2)
-        self.lbl_counts = ttk.Label(
-            newnym_frame,
-            text="Sikeres: 0 / Összes: 0",
-            font=("TkDefaultFont", 8, "bold"),
-        )
-        self.lbl_counts.pack(side=tk.LEFT, padx=8)
-        self.lbl_newnym = ttk.Label(
-            newnym_frame,
-            text="NEWNYM: 0",
-            font=("TkDefaultFont", 8, "bold"),
-            foreground="#2980b9",
-        )
-        self.lbl_newnym.pack(side=tk.LEFT, padx=4)
         ttk.Button(
-            newnym_frame, text="Reset", command=self.reset_counters, width=6
-        ).pack(side=tk.RIGHT)
+            status_right, text="⚙️", width=3, command=self.open_network_settings_dialog
+        ).pack(side=tk.LEFT, padx=2)
 
-        # 3. Filters panel component
+        # 2. Filters panel component
         self.filters_panel = FilterPanel(
             self.root, on_filter_changed=self.apply_filters
         )
         self.filters_panel.live_filter_var.set(cfg.live_filtering)
-        self.filters_panel.pack(fill=tk.X)
+        self.filters_panel.pack(fill=tk.X, padx=4, pady=2)
 
-        # 4. Main body
-        mid = ttk.Frame(self.root, padding=8)
+        # 3. Main body
+        mid = ttk.Frame(self.root, padding=6)
         mid.pack(fill=tk.BOTH, expand=True)
 
         left = ttk.Frame(mid)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        btn = ttk.Frame(left)
-        btn.pack(fill=tk.X, pady=3)
-        self.btn_seeds = ttk.Button(
-            btn, text="🌱 Magok (Tor66, DeepSearch...)", command=self.update_seeds_thread
-        )
-        self.btn_seeds.pack(side=tk.LEFT, padx=2)
-        self.btn_seeds.bind("<Button-3>", lambda e: self.open_seeds_dialog())
-        self.btn_seeds_cfg = ttk.Button(
-            btn, text="⚙️", width=3, command=self.open_seeds_dialog
-        )
-        self.btn_seeds_cfg.pack(side=tk.LEFT, padx=(0, 2))
-        self.btn_github = self.btn_seeds
-        self.btn_start = ttk.Button(
-            btn, text="▶ Start", command=self.start_thread
-        )
-        self.btn_start.pack(side=tk.LEFT, padx=2)
-        self.btn_resume = ttk.Button(
-            btn, text="⏩ Folytatás (Resume)", command=self.resume_thread, state=tk.DISABLED
-        )
-        self.btn_resume.pack(side=tk.LEFT, padx=2)
-        self.btn_stop = ttk.Button(
-            btn, text="⏹ Stop", command=self.stop, state=tk.DISABLED
-        )
-        self.btn_stop.pack(side=tk.LEFT, padx=2)
-        self.btn_newnym = ttk.Button(
-            btn, text="🔄 NEWNYM (Ctrl+N)", command=self.manual_newnym_thread
-        )
-        self.btn_newnym.pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Checkbutton(
-            btn, text="Auto-mentés", variable=self.auto_save_var
-        ).pack(side=tk.LEFT, padx=4)
-        ttk.Checkbutton(
-            btn, text="Auto-seed", variable=self.auto_seed_var
-        ).pack(side=tk.LEFT, padx=3)
-
-        ttk.Label(left, text="Extra .onionok:").pack(anchor=tk.W)
-        self.extra_text = scrolledtext.ScrolledText(left, height=3)
-        self.extra_text.pack(fill=tk.X, pady=2)
 
         # Stats cards
         self.stats_frame = ttk.Frame(left)
@@ -771,7 +841,7 @@ class MainWindow:
         tr.pack(fill=tk.X)
         ttk.Label(tr, text="Egyedi találatok:").pack(side=tk.LEFT)
         self.lbl_backend = ttk.Label(
-            tr, text="Backend: sqlite", foreground="purple", font=("TkDefaultFont", 7)
+            tr, text="Tároló: sqlite", foreground="purple", font=("TkDefaultFont", 7)
         )
         self.lbl_backend.pack(side=tk.RIGHT)
 
@@ -799,8 +869,8 @@ class MainWindow:
         self.tree.heading("url", text=".onion")
         self.tree.heading("lang", text="Nyelv")
         self.tree.heading("category", text="Kat.")
-        self.tree.heading("last_check", text="Utolsó check")
-        self.tree.heading("info", text="Snippet")
+        self.tree.heading("last_check", text="Utolsó ellenőrzés")
+        self.tree.heading("info", text="Részlet")
 
         self.tree.column("title", width=150)
         self.tree.column("url", width=210)
@@ -1114,7 +1184,7 @@ class MainWindow:
 
     def on_backend_switch(self) -> None:
         backend: str = self.backend_var.get()
-        self.lbl_backend.config(text=f"Backend: {backend}")
+        self.lbl_backend.config(text=f"Tároló: {backend}")
         self.log_msg(f"[BACKEND] Váltás: {backend}", force=True, tag="save")
         self.load_state(silent=False)
         self.load_deadlist()
@@ -1397,7 +1467,12 @@ class MainWindow:
                 )
 
     def load_deadlist(self) -> None:
-        self.dead_blacklist = self.get_backend().load_dead()
+        raw_dead = self.get_backend().load_dead()
+        norm_dead = {}
+        for u, ts in raw_dead.items():
+            n = normalize_onion_url(u) or u
+            norm_dead[n] = ts
+        self.dead_blacklist = norm_dead
 
     def save_deadlist(self) -> None:
         self.get_backend().save_dead(self.dead_blacklist)
@@ -1484,8 +1559,39 @@ class MainWindow:
                 self.seen_btc.clear()
                 for k, v in data.get("seen_btc", {}).items():
                     self._cache_btc(k, v)
-                self.checked_urls = set(data.get("checked_urls", []))
-                self.results = data.get("results", [])
+                raw_checked = data.get("checked_urls", [])
+                norm_checked = set()
+                for u in raw_checked:
+                    n = normalize_onion_url(u) or u
+                    norm_checked.add(n)
+                self.checked_urls = norm_checked
+
+                raw_results = data.get("results", [])
+                deduped_results = []
+                self.result_urls.clear()
+                seen_fps = set()
+                for r in raw_results:
+                    u_norm = normalize_onion_url(r.get("url", "")) or r.get("url", "")
+                    fp_val = r.get("fp", "")
+                    if u_norm and u_norm in self.result_urls:
+                        continue
+                    if fp_val and fp_val in seen_fps:
+                        continue
+                    if u_norm:
+                        self.result_urls.add(u_norm)
+                    if fp_val:
+                        seen_fps.add(fp_val)
+                    deduped_results.append(r)
+                self.results = deduped_results
+
+                raw_pending = data.get("pending_queue", [])
+                norm_pending = []
+                for u in raw_pending:
+                    n = normalize_onion_url(u) or u
+                    if n not in norm_pending:
+                        norm_pending.append(n)
+                self.pending_queue = norm_pending
+
                 self.stats = data.get(
                     "stats",
                     {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0},
@@ -1493,7 +1599,6 @@ class MainWindow:
                 self.success_count = data.get("success_count", 0)
                 self.total_count = data.get("total_count", 0)
                 self.total_newnym = data.get("total_newnym", 0)
-                self.pending_queue = data.get("pending_queue", [])
 
             self.next_newnym_success = random.randint(
                 int(self.success_threshold_var.get() * 0.8),
@@ -1525,7 +1630,7 @@ class MainWindow:
             self.lbl_unique.config(text=f"{len(self.results)}")
             self.lbl_checked.config(text=f"{len(self.checked_urls)}")
             self.lbl_newnym.config(text=f"NEWNYM: {self.total_newnym}")
-            self.lbl_backend.config(text=f"Backend: {self.backend_var.get()}")
+            self.lbl_backend.config(text=f"Tároló: {self.backend_var.get()}")
             self.update_counts_label()
             self.filters_panel.set_counts(
                 len(self.results), len(self.results), 0
@@ -1567,7 +1672,7 @@ class MainWindow:
 
     def clear_state(self) -> None:
         if messagebox.askyesno(
-            "Törlés", f"Minden mentés törlése? Backend: {self.backend_var.get()}"
+            "Törlés", f"Minden mentés törlése? Tároló: {self.backend_var.get()}"
         ):
             self.get_backend().clear()
             with self.lock:
@@ -1577,6 +1682,7 @@ class MainWindow:
                 self.in_progress_urls.clear()
                 self.pending_queue.clear()
                 self.results.clear()
+                self.result_urls.clear()
                 self.dead_blacklist.clear()
                 self.pending_results.clear()
                 self.pending_fp.clear()
@@ -1652,8 +1758,10 @@ class MainWindow:
         if not sel:
             return
         url: str = self.tree.item(sel[0])["values"][1]
+        norm_u = normalize_onion_url(url) or url
         with self.lock:
-            self.results = [r for r in self.results if r["url"] != url]
+            self.results = [r for r in self.results if (normalize_onion_url(r.get("url", "")) or r.get("url", "")) != norm_u]
+            self.result_urls.discard(norm_u)
         self.tree.delete(sel[0])
         if self.backend_var.get() == "sqlite":
             try:
@@ -1794,6 +1902,7 @@ class MainWindow:
             self.in_progress_urls.clear()
             self.pending_queue.clear()
             self.results.clear()
+            self.result_urls.clear()
             self.dead_blacklist.clear()
             self.pending_results.clear()
             self.pending_fp.clear()
@@ -1923,7 +2032,7 @@ class MainWindow:
             # Deduplicate against checked and dead sets
             new_seeds = [
                 u for u in found
-                if u not in self.checked_urls and u not in self.dead_blacklist
+                if (normalize_onion_url(u) or u) not in self.checked_urls and (normalize_onion_url(u) or u) not in self.dead_blacklist
             ]
 
             def _update_ui() -> None:
@@ -2284,45 +2393,48 @@ class MainWindow:
 
     def fetch_one(self, url: str, proxy_url: str) -> Dict[str, Any]:
         now_ts = time.time()
+        norm_input_url = normalize_onion_url(url) or url
+
         with self.lock:
-            if url in self.dead_blacklist:
+            if norm_input_url in self.dead_blacklist or url in self.dead_blacklist:
                 return {
-                    "url": url,
+                    "url": norm_input_url,
                     "status": "dead_blacklisted",
                     "ts": now_ts,
                     "lang": "en",
                     "category": "other",
                 }
-            self.in_progress_urls.add(url)
+            self.in_progress_urls.add(norm_input_url)
 
         page = self.fetcher.fetch_page(
             url, proxy_url, is_running_cb=lambda: self.running
         )
-        url_to_save: str = page.get("url", url)
+        raw_url_to_save: str = page.get("url", url)
+        norm_save_url: str = normalize_onion_url(raw_url_to_save) or raw_url_to_save
 
         if page.get("status") == "canceled" or not self.running:
             with self.lock:
-                self.in_progress_urls.discard(url)
-            return {"url": url, "status": "canceled", "ts": now_ts}
+                self.in_progress_urls.discard(norm_input_url)
+            return {"url": norm_save_url, "status": "canceled", "ts": now_ts}
 
         if page.get("status") == "dead":
             with self.lock:
-                self.in_progress_urls.discard(url)
-                self.dead_blacklist[url] = now_ts
-                self.pending_dead[url] = now_ts
-                if url not in self.checked_urls:
-                    self.checked_urls.add(url)
-                    if url not in self.pending_checked:
-                        self.pending_checked.append(url)
+                self.in_progress_urls.discard(norm_input_url)
+                self.dead_blacklist[norm_save_url] = now_ts
+                self.pending_dead[norm_save_url] = now_ts
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
             return page
 
         if page.get("status") == "empty":
             with self.lock:
-                self.in_progress_urls.discard(url)
-                if url not in self.checked_urls:
-                    self.checked_urls.add(url)
-                    if url not in self.pending_checked:
-                        self.pending_checked.append(url)
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
             return page
 
         fp: str = page.get("fp", "")
@@ -2342,14 +2454,14 @@ class MainWindow:
             )
             if not ok:
                 with self.lock:
-                    self.in_progress_urls.discard(url)
-                    if url not in self.checked_urls:
-                        self.checked_urls.add(url)
-                        if url not in self.pending_checked:
-                            self.pending_checked.append(url)
+                    self.in_progress_urls.discard(norm_input_url)
+                    if norm_save_url not in self.checked_urls:
+                        self.checked_urls.add(norm_save_url)
+                        if norm_save_url not in self.pending_checked:
+                            self.pending_checked.append(norm_save_url)
                     self.stats["filtered"] = self.stats.get("filtered", 0) + 1
                 return {
-                    "url": url_to_save,
+                    "url": norm_save_url,
                     "status": "filtered",
                     "reason": reason,
                     "ts": now_ts,
@@ -2357,16 +2469,36 @@ class MainWindow:
                     "category": category,
                 }
 
+        # Deduplication check 1: O(1) set lookup in self.result_urls
+        with self.lock:
+            url_already_in_results = norm_save_url in self.result_urls
+
+        if url_already_in_results:
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return {
+                "url": norm_save_url,
+                "status": "clone",
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+
         is_fp_duplicate, fp_orig = self.is_fp_seen(fp)
         if is_fp_duplicate:
             with self.lock:
-                self.in_progress_urls.discard(url)
-                if url not in self.checked_urls:
-                    self.checked_urls.add(url)
-                    if url not in self.pending_checked:
-                        self.pending_checked.append(url)
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
             return {
-                "url": url_to_save,
+                "url": norm_save_url,
                 "status": "clone",
                 "fp": fp,
                 "ts": now_ts,
@@ -2378,13 +2510,13 @@ class MainWindow:
             is_btc_duplicate, _ = self.is_btc_seen(b)
             if is_btc_duplicate:
                 with self.lock:
-                    self.in_progress_urls.discard(url)
-                    if url not in self.checked_urls:
-                        self.checked_urls.add(url)
-                        if url not in self.pending_checked:
-                            self.pending_checked.append(url)
+                    self.in_progress_urls.discard(norm_input_url)
+                    if norm_save_url not in self.checked_urls:
+                        self.checked_urls.add(norm_save_url)
+                        if norm_save_url not in self.pending_checked:
+                            self.pending_checked.append(norm_save_url)
                 return {
-                    "url": url_to_save,
+                    "url": norm_save_url,
                     "status": "clone_btc",
                     "ts": now_ts,
                     "lang": lang,
@@ -2392,16 +2524,16 @@ class MainWindow:
                 }
 
         with self.lock:
-            self.in_progress_urls.discard(url)
-            self._cache_fp(fp, url_to_save)
-            self.pending_fp[fp] = url_to_save
+            self.in_progress_urls.discard(norm_input_url)
+            self._cache_fp(fp, norm_save_url)
+            self.pending_fp[fp] = norm_save_url
             for b in btc:
-                self._cache_btc(b, url_to_save)
-                self.pending_btc[b] = url_to_save
+                self._cache_btc(b, norm_save_url)
+                self.pending_btc[b] = norm_save_url
 
             result = {
                 "title": title,
-                "url": url_to_save,
+                "url": norm_save_url,
                 "snippet": snippet,
                 "fp": fp,
                 "ts": now_ts,
@@ -2409,14 +2541,15 @@ class MainWindow:
                 "category": category,
             }
             self.results.append(result)
+            self.result_urls.add(norm_save_url)
             self.pending_results.append(result)
-            if url not in self.checked_urls:
-                self.checked_urls.add(url)
-            if url not in self.pending_checked:
-                self.pending_checked.append(url)
+            if norm_save_url not in self.checked_urls:
+                self.checked_urls.add(norm_save_url)
+            if norm_save_url not in self.pending_checked:
+                self.pending_checked.append(norm_save_url)
 
         return {
-            "url": url_to_save,
+            "url": norm_save_url,
             "status": "unique",
             "title": title,
             "snippet": snippet,
@@ -2484,13 +2617,25 @@ class MainWindow:
         self.set_statusbar_color("#e67e22", msg="Leállítás folyamatban...")
         self.log_msg("[STOP] Leállítás kérve...", force=True, tag="tor_err")
 
-    def run_search(self, resume_queue: bool = False, raw_q: str = "", extra_raw: str = "", workers: int = 10, backend: str = "JSON", auto_save: bool = True, port: str = "9050", auto_newnym_success: bool = False, auto_newnym_total: bool = False) -> None:
+    def run_search(self, resume_queue: bool = False, raw_q: str = "", extra_raw: str = "", workers: int = 6, backend: str = "JSON", auto_save: bool = True, port: str = "9050", auto_newnym_success: bool = False, auto_newnym_total: bool = False) -> None:
         self.running = True
         proxy = f"socks5h://127.0.0.1:{port}"
 
         if resume_queue and self.pending_queue:
-            new_urls = [u for u in self.pending_queue if u not in self.checked_urls and u not in self.dead_blacklist]
-            all_onions_count = len(new_urls) + len(self.checked_urls)
+            norm_pending = []
+            for u in self.pending_queue:
+                n = normalize_onion_url(u)
+                if n and n not in norm_pending:
+                    norm_pending.append(n)
+            self.pending_queue = norm_pending
+
+            norm_checked = {normalize_onion_url(u) for u in self.checked_urls}
+            norm_checked.discard(None)
+            norm_dead = {normalize_onion_url(u): ts for u, ts in self.dead_blacklist.items()}
+            norm_dead.pop(None, None)
+
+            new_urls = [u for u in self.pending_queue if u not in norm_checked and u not in norm_dead]
+            all_onions_count = len(new_urls) + len(norm_checked)
             self.log_msg(f"[RESUME] Folytatás {len(new_urls)} hátralévő URL-lel", force=True, tag="start")
         else:
             queries = []
@@ -2509,13 +2654,12 @@ class MainWindow:
             if current.strip():
                 queries.append(current.strip())
 
-            extra = set(
-                re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", extra_raw)
-            )
-            extra.update(
-                [f"http://{m}" for m in re.findall(r"[a-z2-7]{56}\.onion", extra_raw)]
-            )
-            all_onions = set(extra)
+            raw_extra_matches = re.findall(r"(?:https?://)?[a-z2-7]{16,56}\.onion[^\s\"'<>]*", extra_raw, re.IGNORECASE)
+            all_onions = set()
+            for raw_u in raw_extra_matches:
+                norm = normalize_onion_url(raw_u)
+                if norm:
+                    all_onions.add(norm)
 
             ahmia_onions = self.fetcher.search_ahmia(
                 queries,
@@ -2523,16 +2667,32 @@ class MainWindow:
                 allow_clearnet=self.allow_clearnet_var.get(),
                 is_running_cb=lambda: self.running,
             )
-            ose_onions = self.fetcher.search_onionsearchengine(
-                queries, is_running_cb=lambda: self.running
-            )
-            all_onions.update(ahmia_onions)
-            all_onions.update(ose_onions)
+            for u in ahmia_onions:
+                norm = normalize_onion_url(u)
+                if norm:
+                    all_onions.add(norm)
+
+            # Ahmia keresés után, ha már van elegendő találat (≥ 30), ne futtasd az OnionSearchEngine-t
+            if len(all_onions) >= 30:
+                self.log_msg(f"[SEARCH] Ahmia találatok száma ({len(all_onions)}) >= 30, OnionSearchEngine kihagyva.", force=True, tag="info")
+            else:
+                ose_onions = self.fetcher.search_onionsearchengine(
+                    queries, is_running_cb=lambda: self.running
+                )
+                for u in ose_onions:
+                    norm = normalize_onion_url(u)
+                    if norm:
+                        all_onions.add(norm)
+
+            norm_checked = {normalize_onion_url(u) for u in self.checked_urls}
+            norm_checked.discard(None)
+            norm_dead = {normalize_onion_url(u): ts for u, ts in self.dead_blacklist.items()}
+            norm_dead.pop(None, None)
 
             new_urls = [
                 u
                 for u in all_onions
-                if u not in self.checked_urls and u not in self.dead_blacklist
+                if u not in norm_checked and u not in norm_dead
             ]
             all_onions_count = len(all_onions)
             self.log_msg(
@@ -2553,6 +2713,80 @@ class MainWindow:
         self.root.after(0, _setup_ui)
 
         completed = 0
+        ui_batch_items: List[Dict[str, Any]] = []
+
+        def _flush_ui(comp: int):
+            with self.lock:
+                batch = list(ui_batch_items)
+                ui_batch_items.clear()
+
+            pct = int(comp / total * 100) if total else 0
+            elapsed = time.time() - self.start_time if self.start_time else 1
+            speed = comp / elapsed if elapsed > 0 else 0
+            self.progress.config(value=comp)
+            self.lbl_percent.config(text=f"{pct}%")
+            self.lbl_speed.config(text=f"{speed:.1f} req/s | {comp}/{total}")
+
+            with self.lock:
+                total_s = self.stats.get("total", 0)
+                alive_s = self.stats.get("alive", 0)
+                dead_s = self.stats.get("dead", 0)
+                clone_s = self.stats.get("clone", 0)
+                filt_s = self.stats.get("filtered", 0)
+                checked_len = len(self.checked_urls)
+                results_len = len(self.results)
+            self.lbl_total.config(text=f"{total_s}")
+            self.lbl_checked.config(text=f"{checked_len}")
+            self.lbl_alive.config(text=f"{alive_s}")
+            self.lbl_dead.config(text=f"{dead_s}")
+            self.lbl_clone.config(text=f"{clone_s}")
+            self.lbl_unique.config(text=f"{results_len}")
+            self.lbl_filtered.config(text=f"{filt_s}")
+
+            for item in batch:
+                if item["status"] == "unique":
+                    ts_str = fmt_ts(item.get("ts"))
+                    visible, _ = self.filters_panel.is_item_visible(item)
+                    if visible:
+                        tags = []
+                        l = item.get("lang", "en")
+                        if l in ("hu", "en", "de", "ru", "fr"):
+                            tags.append(f"lang_{l}")
+                        if item.get("category") == "forum":
+                            tags.append("cat_forum")
+                        self.tree.insert(
+                            "",
+                            tk.END,
+                            values=(
+                                item["title"],
+                                item["url"],
+                                item.get("lang", ""),
+                                item.get("category", ""),
+                                ts_str,
+                                item["snippet"],
+                            ),
+                            tags=tuple(tags),
+                        )
+                    self.log_msg(
+                        f"[OK] {item['title']} [{item.get('lang','')}/{item.get('category','')}] - {item['url'][:50]}",
+                        tag="ok",
+                    )
+                elif item["status"] == "filtered":
+                    self.log_msg(
+                        f"[PRECISE FILTER] {item['url'][:60]} -> {item.get('reason','')}",
+                        tag="filter",
+                    )
+                elif "clone" in item["status"]:
+                    self.log_msg(f"[CLONE] {item['url'][:60]}", tag="clone")
+                else:
+                    if item["status"] == "dead":
+                        self.log_msg(
+                            f"[-] HALOTT: {item['url'][:60]} ({item.get('code','')})",
+                            tag="dead",
+                        )
+
+            if comp % 25 == 0 and auto_save:
+                self.save_incremental_pending()
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
@@ -2574,6 +2808,7 @@ class MainWindow:
                 with self.lock:
                     if url_finished in self.pending_queue:
                         self.pending_queue.remove(url_finished)
+                    ui_batch_items.append(res)
 
                 is_success = res["status"] in ("unique", "clone", "clone_btc")
                 with self.lock:
@@ -2591,77 +2826,11 @@ class MainWindow:
 
                 self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
 
-                def _update(res=res, comp=completed):
-                    pct = int(comp / total * 100) if total else 0
-                    elapsed = (
-                        time.time() - self.start_time if self.start_time else 1
-                    )
-                    speed = comp / elapsed if elapsed > 0 else 0
-                    self.progress.config(value=comp)
-                    self.lbl_percent.config(text=f"{pct}%")
-                    self.lbl_speed.config(
-                        text=f"{speed:.1f} req/s | {comp}/{total}"
-                    )
-                    with self.lock:
-                        total_s = self.stats.get("total", 0)
-                        alive_s = self.stats.get("alive", 0)
-                        dead_s = self.stats.get("dead", 0)
-                        clone_s = self.stats.get("clone", 0)
-                        filt_s = self.stats.get("filtered", 0)
-                        checked_len = len(self.checked_urls)
-                        results_len = len(self.results)
-                    self.lbl_total.config(text=f"{total_s}")
-                    self.lbl_checked.config(text=f"{checked_len}")
-                    self.lbl_alive.config(text=f"{alive_s}")
-                    self.lbl_dead.config(text=f"{dead_s}")
-                    self.lbl_clone.config(text=f"{clone_s}")
-                    self.lbl_unique.config(text=f"{results_len}")
-                    self.lbl_filtered.config(text=f"{filt_s}")
-
-                    if res["status"] == "unique":
-                        ts_str = fmt_ts(res.get("ts"))
-                        visible, _ = self.filters_panel.is_item_visible(res)
-                        if visible:
-                            tags = []
-                            l = res.get("lang", "en")
-                            if l in ("hu", "en", "de", "ru", "fr"):
-                                tags.append(f"lang_{l}")
-                            if res.get("category") == "forum":
-                                tags.append("cat_forum")
-                            self.tree.insert(
-                                "",
-                                tk.END,
-                                values=(
-                                    res["title"],
-                                    res["url"],
-                                    res.get("lang", ""),
-                                    res.get("category", ""),
-                                    ts_str,
-                                    res["snippet"],
-                                ),
-                                tags=tuple(tags),
-                            )
-                        self.log_msg(
-                            f"[OK] {res['title']} [{res.get('lang','')}/{res.get('category','')}] - {res['url'][:50]}",
-                            tag="ok",
-                        )
-                    elif res["status"] == "filtered":
-                        self.log_msg(
-                            f"[PRECISE FILTER] {res['url'][:60]} -> {res.get('reason','')}",
-                            tag="filter",
-                        )
-                    elif "clone" in res["status"]:
-                        self.log_msg(f"[CLONE] {res['url'][:60]}", tag="clone")
-                    else:
-                        if res["status"] == "dead":
-                            self.log_msg(
-                                f"[-] HALOTT: {res['url'][:60]} ({res.get('code','')})",
-                                tag="dead",
-                            )
-                    if comp % 10 == 0 and auto_save:
-                        self.save_incremental_pending()
-
-                self.root.after(0, _update)
+                now_t = time.time()
+                if completed % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or completed == total:
+                    self._last_ui_update_ts = now_t
+                    c_snap = completed
+                    self.root.after(0, lambda c=c_snap: _flush_ui(c))
 
         with self.lock:
             self.in_progress_urls.clear()

@@ -95,4 +95,4 @@ def test_extract_bitcoin_addresses_with_checksum():
 def test_content_detector_class():
     detector = ContentDetector()
     assert detector.detect_category("Forum Index", "topics and threads") == "forum"
-    assert len(detector.extract_fingerprint("Hello World")) == 16
+    assert len(detector.extract_fingerprint("Hello World")) == 20

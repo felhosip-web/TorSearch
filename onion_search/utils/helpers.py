@@ -122,3 +122,56 @@ def parse_list(s: Optional[str]) -> List[str]:
     if not s:
         return []
     return [p.strip().lower() for p in s.split(",") if p.strip()]
+
+
+import re
+from urllib.parse import urlparse
+
+ONION_HOST_REGEX: re.Pattern[str] = re.compile(r"^[a-z2-7]{16,56}\.onion$", re.IGNORECASE)
+
+
+def normalize_onion_url(url: str, host_only: bool = False) -> Optional[str]:
+    """
+    Normalize and validate .onion URLs according to strict criteria:
+    - Always uses http:// scheme
+    - Hostname is lowercased
+    - Trailing slash removed from path
+    - Query string and fragment dropped
+    - Only valid .onion domains accepted
+    - Returns 'http://hostname.onion' if path is empty/root or if host_only is True
+    """
+    if not url or not isinstance(url, str):
+        return None
+
+    s = url.strip()
+    if not s:
+        return None
+
+    # Handle scheme-less URLs if passed (e.g. "abc...onion/path")
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+-.]*://", s):
+        s = "http://" + s
+
+    try:
+        parsed = urlparse(s)
+    except Exception:
+        return None
+
+    host = (parsed.hostname or "").strip().lower()
+    if not host or not ONION_HOST_REGEX.match(host):
+        return None
+
+    if host_only:
+        return f"http://{host}"
+
+    path = parsed.path or ""
+    # Strip trailing slashes
+    while len(path) > 1 and path.endswith("/"):
+        path = path[:-1]
+
+    if path in ("", "/"):
+        return f"http://{host}"
+
+    if not path.startswith("/"):
+        path = "/" + path
+
+    return f"http://{host}{path}"

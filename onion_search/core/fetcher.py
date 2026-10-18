@@ -39,7 +39,7 @@ from onion_search.core.detector import (
     extract_fingerprint,
 )
 from onion_search.core.seeds import SeedManager
-from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET
+from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET, normalize_onion_url
 
 # Fast lxml parser detection with graceful fallback
 try:
@@ -96,7 +96,7 @@ def close_all_thread_sessions():
 class DomainRateLimiter:
     """Thread-safe per-domain rate limiter to avoid overwhelming .onion services."""
 
-    def __init__(self, min_domain_delay=1.0):
+    def __init__(self, min_domain_delay=0.7):
         self.min_domain_delay = min_domain_delay
         self.last_domain_request = {}
         self.lock = threading.Lock()
@@ -195,7 +195,7 @@ class OnionFetcher:
         session_manager=None,
         detector=None,
         max_retries=2,
-        domain_delay=1.0,
+        domain_delay=0.7,
         respect_robots=False,
         seed_manager=None,
     ):
@@ -333,9 +333,9 @@ class OnionFetcher:
                     if ".onion" in h:
                         if "redirect_url=" in h:
                             h = h.split("redirect_url=")[1]
-                        h = h.split("?")[0].split("#")[0]
-                        if len(h) > 20:
-                            all_onions.add(h)
+                        norm = normalize_onion_url(h)
+                        if norm:
+                            all_onions.add(norm)
             except Exception:
                 pass
         return all_onions
@@ -356,9 +356,9 @@ class OnionFetcher:
                 for a in soup.find_all("a", href=True):
                     h = a["href"]
                     if ".onion" in h:
-                        h = h.split("?")[0].split("#")[0]
-                        if len(h) > 20:
-                            all_onions.add(h)
+                        norm = normalize_onion_url(h)
+                        if norm:
+                            all_onions.add(norm)
             except Exception:
                 pass
         return all_onions

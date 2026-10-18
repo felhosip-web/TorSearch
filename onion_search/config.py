@@ -23,7 +23,7 @@ from typing import Any, Dict
 
 # Application Metadata
 APP_NAME = "Onion Kereső"
-APP_VERSION = "4.9.3"
+APP_VERSION = "4.9.4"
 APP_AUTHOR = "HES Projects by FePe"
 APP_LICENSE = "Apache-2.0"
 APP_COPYRIGHT = "Copyright 2026 HES Projects by FePe"
@@ -46,7 +46,7 @@ MAX_CONTENT_TEXT_LENGTH: int = 8000
 USER_AGENT_ROTATE_PROBABILITY: float = 0.3
 MIN_NEWNYM_INTERVAL_AUTO: float = 12.0
 MIN_NEWNYM_INTERVAL_TRIGGER: float = 15.0
-DEFAULT_DOMAIN_DELAY: float = 1.0
+DEFAULT_DOMAIN_DELAY: float = 0.7
 DEFAULT_MAX_RETRIES: int = 2
 MAX_MEMORY_CACHE_SIZE: int = 50000
 
@@ -85,6 +85,7 @@ class AppConfig:
     timeout_get: int = DEFAULT_TIMEOUT_GET
     domain_delay: float = DEFAULT_DOMAIN_DELAY
     queries: str = "forum, board, wiki, library"
+    normalize_to_host_only: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":

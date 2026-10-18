@@ -13,15 +13,18 @@ from onion_search.core.seeds import SeedManager, extract_onion_urls
 
 
 def test_extract_onion_urls():
-    u1 = "http://" + "a" * 56 + ".onion"
-    u2 = "https://" + "b" * 56 + ".onion/fresh"
-    u3 = "HTTP://" + "C" * 56 + ".ONION"
+    u1_host = "a" * 56 + ".onion"
+    u2_host = "b" * 56 + ".onion"
+    u3_host = "c" * 56 + ".onion"
+    u1 = f"http://{u1_host}"
+    u2 = f"https://{u2_host}/fresh"
+    u3 = f"HTTP://{u3_host.upper()}"
     text = f"Here are some sites: {u1} and {u2} and invalid_onion.onion and uppercase {u3}"
     extracted = extract_onion_urls(text)
     assert len(extracted) == 3
-    assert ("http://" + "a" * 56 + ".onion") in extracted
-    assert ("http://" + "b" * 56 + ".onion") in extracted
-    assert ("http://" + "c" * 56 + ".onion") in extracted
+    assert f"http://{u1_host}" in extracted
+    assert f"http://{u2_host}/fresh" in extracted
+    assert f"http://{u3_host}" in extracted
 
 
 def test_seed_manager_cache_lifecycle():

@@ -18,6 +18,7 @@ Developed by HES Projects by FePe.
 from onion_search.utils.helpers import (
     fmt_ts,
     parse_list,
+    normalize_onion_url,
     HEADERS_LIST,
     TIMEOUT_GET,
     STATE_DIR,
@@ -41,6 +42,7 @@ from onion_search.utils.helpers import (
 __all__ = [
     "fmt_ts",
     "parse_list",
+    "normalize_onion_url",
     "HEADERS_LIST",
     "TIMEOUT_GET",
     "STATE_DIR",

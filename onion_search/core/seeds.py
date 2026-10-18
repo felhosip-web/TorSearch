@@ -43,10 +43,11 @@ from onion_search.utils.helpers import (
     TIMEOUT_GET,
     TOR66_SOURCES,
     TORCH_SOURCES,
+    normalize_onion_url,
 )
 
 logger = logging.getLogger("onion_search")
-ONION_REGEX = re.compile(r"\b([a-z2-7]{16,56})\.onion\b", re.IGNORECASE)
+ONION_REGEX = re.compile(r"\b(?:https?://)?([a-z2-7]{16,56}\.onion)(?:/[^\s\"'<>]*)?", re.IGNORECASE)
 
 
 def extract_onion_urls(text: str) -> Set[str]:
@@ -55,8 +56,10 @@ def extract_onion_urls(text: str) -> Set[str]:
     if not text:
         return found
     for match in ONION_REGEX.finditer(text):
-        m_lower = match.group(1).lower()
-        found.add(f"http://{m_lower}.onion")
+        raw_match = match.group(0)
+        norm = normalize_onion_url(raw_match)
+        if norm:
+            found.add(norm)
     return found
 
 

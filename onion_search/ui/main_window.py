@@ -1485,7 +1485,23 @@ class MainWindow:
                 for k, v in data.get("seen_btc", {}).items():
                     self._cache_btc(k, v)
                 self.checked_urls = set(data.get("checked_urls", []))
-                self.results = data.get("results", [])
+                raw_results = data.get("results", [])
+                deduped_results = []
+                seen_urls = set()
+                seen_fps = set()
+                for r in raw_results:
+                    u_norm = normalize_onion_url(r.get("url", "")) or r.get("url", "")
+                    fp_val = r.get("fp", "")
+                    if u_norm and u_norm in seen_urls:
+                        continue
+                    if fp_val and fp_val in seen_fps:
+                        continue
+                    if u_norm:
+                        seen_urls.add(u_norm)
+                    if fp_val:
+                        seen_fps.add(fp_val)
+                    deduped_results.append(r)
+                self.results = deduped_results
                 self.stats = data.get(
                     "stats",
                     {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0},
@@ -2357,6 +2373,29 @@ class MainWindow:
                     "category": category,
                 }
 
+        # Deduplication check 1: normalized URL already in self.results or checked
+        norm_save_url = normalize_onion_url(url_to_save) or url_to_save
+        with self.lock:
+            url_already_in_results = any(
+                normalize_onion_url(r.get("url", "")) == norm_save_url for r in self.results
+            )
+
+        if url_already_in_results:
+            with self.lock:
+                self.in_progress_urls.discard(url)
+                if url not in self.checked_urls:
+                    self.checked_urls.add(url)
+                    if url not in self.pending_checked:
+                        self.pending_checked.append(url)
+            return {
+                "url": url_to_save,
+                "status": "clone",
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+
         is_fp_duplicate, fp_orig = self.is_fp_seen(fp)
         if is_fp_duplicate:
             with self.lock:
@@ -2484,13 +2523,25 @@ class MainWindow:
         self.set_statusbar_color("#e67e22", msg="Leállítás folyamatban...")
         self.log_msg("[STOP] Leállítás kérve...", force=True, tag="tor_err")
 
-    def run_search(self, resume_queue: bool = False, raw_q: str = "", extra_raw: str = "", workers: int = 10, backend: str = "JSON", auto_save: bool = True, port: str = "9050", auto_newnym_success: bool = False, auto_newnym_total: bool = False) -> None:
+    def run_search(self, resume_queue: bool = False, raw_q: str = "", extra_raw: str = "", workers: int = 6, backend: str = "JSON", auto_save: bool = True, port: str = "9050", auto_newnym_success: bool = False, auto_newnym_total: bool = False) -> None:
         self.running = True
         proxy = f"socks5h://127.0.0.1:{port}"
 
         if resume_queue and self.pending_queue:
-            new_urls = [u for u in self.pending_queue if u not in self.checked_urls and u not in self.dead_blacklist]
-            all_onions_count = len(new_urls) + len(self.checked_urls)
+            norm_pending = []
+            for u in self.pending_queue:
+                n = normalize_onion_url(u)
+                if n and n not in norm_pending:
+                    norm_pending.append(n)
+            self.pending_queue = norm_pending
+
+            norm_checked = {normalize_onion_url(u) for u in self.checked_urls}
+            norm_checked.discard(None)
+            norm_dead = {normalize_onion_url(u): ts for u, ts in self.dead_blacklist.items()}
+            norm_dead.pop(None, None)
+
+            new_urls = [u for u in self.pending_queue if u not in norm_checked and u not in norm_dead]
+            all_onions_count = len(new_urls) + len(norm_checked)
             self.log_msg(f"[RESUME] Folytatás {len(new_urls)} hátralévő URL-lel", force=True, tag="start")
         else:
             queries = []
@@ -2509,13 +2560,12 @@ class MainWindow:
             if current.strip():
                 queries.append(current.strip())
 
-            extra = set(
-                re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", extra_raw)
-            )
-            extra.update(
-                [f"http://{m}" for m in re.findall(r"[a-z2-7]{56}\.onion", extra_raw)]
-            )
-            all_onions = set(extra)
+            raw_extra_matches = re.findall(r"(?:https?://)?[a-z2-7]{16,56}\.onion[^\s\"'<>]*", extra_raw, re.IGNORECASE)
+            all_onions = set()
+            for raw_u in raw_extra_matches:
+                norm = normalize_onion_url(raw_u)
+                if norm:
+                    all_onions.add(norm)
 
             ahmia_onions = self.fetcher.search_ahmia(
                 queries,
@@ -2523,16 +2573,32 @@ class MainWindow:
                 allow_clearnet=self.allow_clearnet_var.get(),
                 is_running_cb=lambda: self.running,
             )
-            ose_onions = self.fetcher.search_onionsearchengine(
-                queries, is_running_cb=lambda: self.running
-            )
-            all_onions.update(ahmia_onions)
-            all_onions.update(ose_onions)
+            for u in ahmia_onions:
+                norm = normalize_onion_url(u)
+                if norm:
+                    all_onions.add(norm)
+
+            # Ahmia keresés után, ha már van elegendő találat (≥ 30), ne futtasd az OnionSearchEngine-t
+            if len(all_onions) >= 30:
+                self.log_msg(f"[SEARCH] Ahmia találatok száma ({len(all_onions)}) >= 30, OnionSearchEngine kihagyva.", force=True, tag="info")
+            else:
+                ose_onions = self.fetcher.search_onionsearchengine(
+                    queries, is_running_cb=lambda: self.running
+                )
+                for u in ose_onions:
+                    norm = normalize_onion_url(u)
+                    if norm:
+                        all_onions.add(norm)
+
+            norm_checked = {normalize_onion_url(u) for u in self.checked_urls}
+            norm_checked.discard(None)
+            norm_dead = {normalize_onion_url(u): ts for u, ts in self.dead_blacklist.items()}
+            norm_dead.pop(None, None)
 
             new_urls = [
                 u
                 for u in all_onions
-                if u not in self.checked_urls and u not in self.dead_blacklist
+                if u not in norm_checked and u not in norm_dead
             ]
             all_onions_count = len(all_onions)
             self.log_msg(
@@ -2658,10 +2724,14 @@ class MainWindow:
                                 f"[-] HALOTT: {res['url'][:60]} ({res.get('code','')})",
                                 tag="dead",
                             )
-                    if comp % 10 == 0 and auto_save:
+                    if comp % 25 == 0 and auto_save:
                         self.save_incremental_pending()
 
-                self.root.after(0, _update)
+                # Batch UI updates: frissítsünk minden 5. találatnál VAGY ha legalább 300 ms eltelt VAGY az utolsó elemről van szó
+                now_t = time.time()
+                if comp % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or comp == total:
+                    self._last_ui_update_ts = now_t
+                    self.root.after(0, _update)
 
         with self.lock:
             self.in_progress_urls.clear()

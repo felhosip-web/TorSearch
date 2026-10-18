@@ -301,9 +301,31 @@ def detect_category(title: str, text: str, soup: Optional[BeautifulSoup] = None)
 
 
 def extract_fingerprint(text: str) -> str:
-    """Generate a 16-hex fingerprint from text after removing digits to identify content clones."""
-    core: str = re.sub(r"\d+", "", text)
-    return hashlib.sha256(core.encode()).hexdigest()[:16]
+    r"""
+    Generate a 20-hex fingerprint from text to identify content clones.
+    Rules:
+    - Dobja ki a számokat (\d)
+    - Dobja ki az írásjeleket
+    - Normalizálja a whitespace-t
+    - Csak az első ~4000 karaktert vegye figyelembe
+    - 20 karakteres hex hash-t adjon vissza
+    """
+    if not text:
+        return hashlib.sha256(b"").hexdigest()[:20]
+
+    # Limit to first ~4000 characters
+    truncated: str = text[:4000]
+
+    # Remove digits
+    no_digits: str = re.sub(r"\d+", "", truncated)
+
+    # Remove punctuation (keep word chars and whitespace, strip punctuation)
+    no_punct: str = re.sub(r"[^\w\s]", "", no_digits, flags=re.UNICODE)
+
+    # Normalize whitespace
+    normalized_ws: str = re.sub(r"\s+", " ", no_punct).strip()
+
+    return hashlib.sha256(normalized_ws.encode("utf-8")).hexdigest()[:20]
 
 
 class ContentDetector:

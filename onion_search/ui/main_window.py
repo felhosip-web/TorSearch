@@ -580,199 +580,83 @@ class MainWindow:
     def setup_ui(self) -> None:
         cfg = self.config_manager.config
 
-        # 1. Top toolbar
-        top = ttk.Frame(self.root, padding=8)
-        top.pack(fill=tk.X)
-        ttk.Label(top, text="Ahmia szavak:").pack(side=tk.LEFT)
-        self.query_entry = ttk.Entry(top, width=18)
-        self.query_entry.insert(0, cfg.queries)
-        self.query_entry.pack(side=tk.LEFT, padx=3)
-
-        ttk.Label(top, text="Tor:").pack(side=tk.LEFT, padx=(4, 0))
+        # Unpacked variables & widget handles maintained in memory for dialogs and backend logic
         self.port_var = tk.StringVar(value=cfg.socks_port)
-        ttk.Combobox(
-            top, textvariable=self.port_var, values=["9050", "9150"], width=5
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(top, text="Ctrl:").pack(side=tk.LEFT, padx=(4, 0))
         self.ctrl_port_var = tk.StringVar(value=cfg.ctrl_port)
-        ttk.Combobox(
-            top, textvariable=self.ctrl_port_var, values=["9051", "9151"], width=5
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(top, text="Szálak:").pack(side=tk.LEFT, padx=(4, 0))
         self.worker_var = tk.IntVar(value=cfg.workers)
-        ttk.Spinbox(
-            top, from_=2, to=10, textvariable=self.worker_var, width=3
-        ).pack(side=tk.LEFT)
+        self.backend_combo = ttk.Combobox(self.root, textvariable=self.backend_var, values=["sqlite", "json"])
+        self.backend_combo.bind("<<ComboboxSelected>>", lambda e: self.on_backend_switch())
+        self.lbl_counts = ttk.Label(self.root, text="")
+        self.lbl_newnym = ttk.Label(self.root, text="")
+        self.extra_text = scrolledtext.ScrolledText(self.root, height=1)
+        self.btn_theme = ttk.Button(self.root)
 
-        ttk.Label(top, text="Tároló:").pack(side=tk.LEFT, padx=(6, 0))
-        self.backend_combo = ttk.Combobox(
-            top,
-            textvariable=self.backend_var,
-            values=["sqlite", "json"],
-            width=6,
-            state="readonly",
-        )
-        self.backend_combo.pack(side=tk.LEFT)
-        self.backend_combo.bind(
-            "<<ComboboxSelected>>", lambda e: self.on_backend_switch()
-        )
+        # 1. Clean Top Search Header Toolbar
+        top = ttk.Frame(self.root, padding=6)
+        top.pack(fill=tk.X)
 
-        ttk.Checkbutton(top, text="Clearnet engedélyezve", variable=self.allow_clearnet_var).pack(
-            side=tk.LEFT, padx=3
-        )
-        ttk.Checkbutton(top, text="Titkosítva", variable=self.encrypt_storage_var).pack(
-            side=tk.LEFT, padx=3
-        )
+        ttk.Label(top, text="Ahmia szavak:", font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT, padx=(4, 2))
+        self.query_entry = ttk.Entry(top, width=28)
+        self.query_entry.insert(0, cfg.queries)
+        self.query_entry.pack(side=tk.LEFT, padx=4)
 
-        persist = ttk.Frame(top)
-        persist.pack(side=tk.RIGHT)
-        self.btn_panic = ttk.Button(
-            persist, text="🚨 PÁNIK (Ctrl+Shift+Del)", command=self.panic_wipe
+        self.btn_start = ttk.Button(
+            top, text="▶ Indítás", command=self.start_thread
         )
-        self.btn_panic.pack(side=tk.LEFT, padx=3)
-        self.btn_theme = ttk.Button(
-            persist, text="🌙 Sötét mód", command=self.toggle_theme
+        self.btn_start.pack(side=tk.LEFT, padx=3)
+        self.btn_resume = ttk.Button(
+            top, text="⏩ Folytatás", command=self.resume_thread, state=tk.DISABLED
         )
-        self.btn_theme.pack(side=tk.LEFT, padx=2)
+        self.btn_resume.pack(side=tk.LEFT, padx=3)
+        self.btn_stop = ttk.Button(
+            top, text="⏹ Leállítás", command=self.stop, state=tk.DISABLED
+        )
+        self.btn_stop.pack(side=tk.LEFT, padx=3)
 
-        ttk.Button(
-            persist, text="💾", width=3, command=lambda: self.save_state(silent=False)
-        ).pack(side=tk.LEFT, padx=1)
-        ttk.Button(
-            persist, text="📂", width=3, command=lambda: self.load_state()
-        ).pack(side=tk.LEFT, padx=1)
-        ttk.Button(persist, text="🗑", width=3, command=self.clear_state).pack(
-            side=tk.LEFT, padx=1
+        self.btn_seeds = ttk.Button(
+            top, text="🌱 Magok", command=self.update_seeds_thread
         )
-        ttk.Button(
-            persist, text="ℹ️ Licenc", command=self.open_about_dialog
-        ).pack(side=tk.LEFT, padx=2)
+        self.btn_seeds.pack(side=tk.LEFT, padx=(10, 2))
+        self.btn_seeds.bind("<Button-3>", lambda e: self.open_seeds_dialog())
+        self.btn_seeds_cfg = ttk.Button(
+            top, text="⚙️", width=3, command=self.open_seeds_dialog
+        )
+        self.btn_seeds_cfg.pack(side=tk.LEFT, padx=2)
+        self.btn_github = self.btn_seeds
 
-        # 2. Status & NEWNYM toolbar
-        status_top = ttk.Frame(self.root, padding=(8, 2))
-        status_top.pack(fill=tk.X)
-        self.canvas_socks = tk.Canvas(
-            status_top, width=16, height=16, highlightthickness=0
-        )
-        self.canvas_socks.pack(side=tk.LEFT)
-        self.led_socks = self.canvas_socks.create_oval(
-            2, 2, 14, 14, fill="gray", outline=""
-        )
-        ttk.Label(status_top, text="SOCKS").pack(side=tk.LEFT, padx=(2, 8))
+        # Tor Status Indicators
+        status_right = ttk.Frame(top)
+        status_right.pack(side=tk.RIGHT, padx=6)
+        self.canvas_socks = tk.Canvas(status_right, width=12, height=12, highlightthickness=0)
+        self.canvas_socks.pack(side=tk.LEFT, padx=2)
+        self.led_socks = self.canvas_socks.create_oval(1, 1, 11, 11, fill="gray", outline="")
 
-        self.canvas_ctrl = tk.Canvas(
-            status_top, width=16, height=16, highlightthickness=0
-        )
-        self.canvas_ctrl.pack(side=tk.LEFT)
-        self.led_ctrl = self.canvas_ctrl.create_oval(
-            2, 2, 14, 14, fill="gray", outline=""
-        )
-        ttk.Label(status_top, text="CTRL").pack(side=tk.LEFT, padx=(2, 12))
+        self.canvas_ctrl = tk.Canvas(status_right, width=12, height=12, highlightthickness=0)
+        self.canvas_ctrl.pack(side=tk.LEFT, padx=2)
+        self.led_ctrl = self.canvas_ctrl.create_oval(1, 1, 11, 11, fill="gray", outline="")
 
         self.lbl_tor_status = ttk.Label(
-            status_top, text="Tor: ellenőrzés...", foreground="gray"
+            status_right, text="Tor: ellenőrzés...", foreground="gray", font=("TkDefaultFont", 8)
         )
-        self.lbl_tor_status.pack(side=tk.LEFT)
-        ttk.Button(
-            status_top, text="🔍 Tor automatikus felismerés", command=self.auto_detect_tor
-        ).pack(side=tk.LEFT, padx=10)
-        ttk.Separator(status_top, orient="vertical").pack(
-            side=tk.LEFT, fill=tk.Y, padx=12
-        )
+        self.lbl_tor_status.pack(side=tk.LEFT, padx=4)
 
-        newnym_frame = ttk.LabelFrame(status_top, text="NEWNYM", padding=2)
-        newnym_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Checkbutton(
-            newnym_frame, text="Sikeresenként:", variable=self.auto_newnym_success_var
-        ).pack(side=tk.LEFT)
-        ttk.Spinbox(
-            newnym_frame,
-            from_=10,
-            to=200,
-            textvariable=self.success_threshold_var,
-            width=5,
-        ).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(
-            newnym_frame, text="Összes:", variable=self.auto_newnym_total_var
-        ).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Spinbox(
-            newnym_frame,
-            from_=20,
-            to=500,
-            textvariable=self.total_threshold_var,
-            width=5,
-        ).pack(side=tk.LEFT, padx=2)
-        self.lbl_counts = ttk.Label(
-            newnym_frame,
-            text="Sikeres: 0 / Összes: 0",
-            font=("TkDefaultFont", 8, "bold"),
-        )
-        self.lbl_counts.pack(side=tk.LEFT, padx=8)
-        self.lbl_newnym = ttk.Label(
-            newnym_frame,
-            text="NEWNYM: 0",
-            font=("TkDefaultFont", 8, "bold"),
-            foreground="#2980b9",
-        )
-        self.lbl_newnym.pack(side=tk.LEFT, padx=4)
         ttk.Button(
-            newnym_frame, text="Visszaállítás", command=self.reset_counters, width=11
-        ).pack(side=tk.RIGHT)
+            status_right, text="⚙️", width=3, command=self.open_network_settings_dialog
+        ).pack(side=tk.LEFT, padx=2)
 
-        # 3. Filters panel component
+        # 2. Filters panel component
         self.filters_panel = FilterPanel(
             self.root, on_filter_changed=self.apply_filters
         )
         self.filters_panel.live_filter_var.set(cfg.live_filtering)
-        self.filters_panel.pack(fill=tk.X)
+        self.filters_panel.pack(fill=tk.X, padx=4, pady=2)
 
-        # 4. Main body
-        mid = ttk.Frame(self.root, padding=8)
+        # 3. Main body
+        mid = ttk.Frame(self.root, padding=6)
         mid.pack(fill=tk.BOTH, expand=True)
 
         left = ttk.Frame(mid)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        btn = ttk.Frame(left)
-        btn.pack(fill=tk.X, pady=3)
-        self.btn_seeds = ttk.Button(
-            btn, text="🌱 Magok (Tor66, DeepSearch...)", command=self.update_seeds_thread
-        )
-        self.btn_seeds.pack(side=tk.LEFT, padx=2)
-        self.btn_seeds.bind("<Button-3>", lambda e: self.open_seeds_dialog())
-        self.btn_seeds_cfg = ttk.Button(
-            btn, text="⚙️", width=3, command=self.open_seeds_dialog
-        )
-        self.btn_seeds_cfg.pack(side=tk.LEFT, padx=(0, 2))
-        self.btn_github = self.btn_seeds
-        self.btn_start = ttk.Button(
-            btn, text="▶ Indítás", command=self.start_thread
-        )
-        self.btn_start.pack(side=tk.LEFT, padx=2)
-        self.btn_resume = ttk.Button(
-            btn, text="⏩ Folytatás", command=self.resume_thread, state=tk.DISABLED
-        )
-        self.btn_resume.pack(side=tk.LEFT, padx=2)
-        self.btn_stop = ttk.Button(
-            btn, text="⏹ Leállítás", command=self.stop, state=tk.DISABLED
-        )
-        self.btn_stop.pack(side=tk.LEFT, padx=2)
-        self.btn_newnym = ttk.Button(
-            btn, text="🔄 NEWNYM (Ctrl+N)", command=self.manual_newnym_thread
-        )
-        self.btn_newnym.pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Checkbutton(
-            btn, text="Auto-mentés", variable=self.auto_save_var
-        ).pack(side=tk.LEFT, padx=4)
-        ttk.Checkbutton(
-            btn, text="Auto-mag", variable=self.auto_seed_var
-        ).pack(side=tk.LEFT, padx=3)
-
-        ttk.Label(left, text="Extra .onionok:").pack(anchor=tk.W)
-        self.extra_text = scrolledtext.ScrolledText(left, height=3)
-        self.extra_text.pack(fill=tk.X, pady=2)
 
         # Stats cards
         self.stats_frame = ttk.Frame(left)

@@ -85,6 +85,7 @@ class AppConfig:
     timeout_get: int = DEFAULT_TIMEOUT_GET
     domain_delay: float = DEFAULT_DOMAIN_DELAY
     queries: str = "forum, board, wiki, library"
+    normalize_to_host_only: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":

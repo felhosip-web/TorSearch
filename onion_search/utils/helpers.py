@@ -130,7 +130,7 @@ from urllib.parse import urlparse
 ONION_HOST_REGEX: re.Pattern[str] = re.compile(r"^[a-z2-7]{16,56}\.onion$", re.IGNORECASE)
 
 
-def normalize_onion_url(url: str) -> Optional[str]:
+def normalize_onion_url(url: str, host_only: bool = False) -> Optional[str]:
     """
     Normalize and validate .onion URLs according to strict criteria:
     - Always uses http:// scheme
@@ -138,7 +138,7 @@ def normalize_onion_url(url: str) -> Optional[str]:
     - Trailing slash removed from path
     - Query string and fragment dropped
     - Only valid .onion domains accepted
-    - Returns 'http://hostname.onion' if path is empty/root
+    - Returns 'http://hostname.onion' if path is empty/root or if host_only is True
     """
     if not url or not isinstance(url, str):
         return None
@@ -159,6 +159,9 @@ def normalize_onion_url(url: str) -> Optional[str]:
     host = (parsed.hostname or "").strip().lower()
     if not host or not ONION_HOST_REGEX.match(host):
         return None
+
+    if host_only:
+        return f"http://{host}"
 
     path = parsed.path or ""
     # Strip trailing slashes

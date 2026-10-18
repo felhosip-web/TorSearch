@@ -304,11 +304,11 @@ def extract_fingerprint(text: str) -> str:
     r"""
     Generate a 20-hex fingerprint from text to identify content clones.
     Rules:
-    - Dobja ki a számokat (\d)
-    - Dobja ki az írásjeleket
-    - Normalizálja a whitespace-t
-    - Csak az első ~4000 karaktert vegye figyelembe
-    - 20 karakteres hex hash-t adjon vissza
+    - Strip all digits (\d)
+    - Strip all punctuation characters
+    - Normalize whitespace
+    - Consider only the first ~4000 characters
+    - Return a 20-character hex SHA-256 prefix
     """
     if not text:
         return hashlib.sha256(b"").hexdigest()[:20]

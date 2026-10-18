@@ -55,7 +55,7 @@ from onion_search.storage.json_backend import JSONBackend
 from onion_search.storage.sqlite_backend import SQLiteBackend
 from onion_search.ui.filters import FilterPanel
 from onion_search.ui.log_panel import LogPanel, logger
-from onion_search.utils.helpers import fmt_ts, parse_list
+from onion_search.utils.helpers import fmt_ts, parse_list, normalize_onion_url
 
 
 class MainWindow:
@@ -96,6 +96,7 @@ class MainWindow:
         self.pending_queue: List[str] = []  # Remaining unvisited URLs for clean resume
         self.dead_blacklist: Dict[str, float] = {}
         self.results: List[Dict[str, Any]] = []
+        self.result_urls: Set[str] = set()
         self.running: bool = False
         self.lock: threading.Lock = threading.Lock()
         self.stats: Dict[str, int] = {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0}
@@ -1397,7 +1398,12 @@ class MainWindow:
                 )
 
     def load_deadlist(self) -> None:
-        self.dead_blacklist = self.get_backend().load_dead()
+        raw_dead = self.get_backend().load_dead()
+        norm_dead = {}
+        for u, ts in raw_dead.items():
+            n = normalize_onion_url(u) or u
+            norm_dead[n] = ts
+        self.dead_blacklist = norm_dead
 
     def save_deadlist(self) -> None:
         self.get_backend().save_dead(self.dead_blacklist)
@@ -1484,24 +1490,39 @@ class MainWindow:
                 self.seen_btc.clear()
                 for k, v in data.get("seen_btc", {}).items():
                     self._cache_btc(k, v)
-                self.checked_urls = set(data.get("checked_urls", []))
+                raw_checked = data.get("checked_urls", [])
+                norm_checked = set()
+                for u in raw_checked:
+                    n = normalize_onion_url(u) or u
+                    norm_checked.add(n)
+                self.checked_urls = norm_checked
+
                 raw_results = data.get("results", [])
                 deduped_results = []
-                seen_urls = set()
+                self.result_urls.clear()
                 seen_fps = set()
                 for r in raw_results:
                     u_norm = normalize_onion_url(r.get("url", "")) or r.get("url", "")
                     fp_val = r.get("fp", "")
-                    if u_norm and u_norm in seen_urls:
+                    if u_norm and u_norm in self.result_urls:
                         continue
                     if fp_val and fp_val in seen_fps:
                         continue
                     if u_norm:
-                        seen_urls.add(u_norm)
+                        self.result_urls.add(u_norm)
                     if fp_val:
                         seen_fps.add(fp_val)
                     deduped_results.append(r)
                 self.results = deduped_results
+
+                raw_pending = data.get("pending_queue", [])
+                norm_pending = []
+                for u in raw_pending:
+                    n = normalize_onion_url(u) or u
+                    if n not in norm_pending:
+                        norm_pending.append(n)
+                self.pending_queue = norm_pending
+
                 self.stats = data.get(
                     "stats",
                     {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0},
@@ -1509,7 +1530,6 @@ class MainWindow:
                 self.success_count = data.get("success_count", 0)
                 self.total_count = data.get("total_count", 0)
                 self.total_newnym = data.get("total_newnym", 0)
-                self.pending_queue = data.get("pending_queue", [])
 
             self.next_newnym_success = random.randint(
                 int(self.success_threshold_var.get() * 0.8),
@@ -1593,6 +1613,7 @@ class MainWindow:
                 self.in_progress_urls.clear()
                 self.pending_queue.clear()
                 self.results.clear()
+                self.result_urls.clear()
                 self.dead_blacklist.clear()
                 self.pending_results.clear()
                 self.pending_fp.clear()
@@ -1668,8 +1689,10 @@ class MainWindow:
         if not sel:
             return
         url: str = self.tree.item(sel[0])["values"][1]
+        norm_u = normalize_onion_url(url) or url
         with self.lock:
-            self.results = [r for r in self.results if r["url"] != url]
+            self.results = [r for r in self.results if (normalize_onion_url(r.get("url", "")) or r.get("url", "")) != norm_u]
+            self.result_urls.discard(norm_u)
         self.tree.delete(sel[0])
         if self.backend_var.get() == "sqlite":
             try:
@@ -1810,6 +1833,7 @@ class MainWindow:
             self.in_progress_urls.clear()
             self.pending_queue.clear()
             self.results.clear()
+            self.result_urls.clear()
             self.dead_blacklist.clear()
             self.pending_results.clear()
             self.pending_fp.clear()
@@ -1939,7 +1963,7 @@ class MainWindow:
             # Deduplicate against checked and dead sets
             new_seeds = [
                 u for u in found
-                if u not in self.checked_urls and u not in self.dead_blacklist
+                if (normalize_onion_url(u) or u) not in self.checked_urls and (normalize_onion_url(u) or u) not in self.dead_blacklist
             ]
 
             def _update_ui() -> None:
@@ -2300,45 +2324,48 @@ class MainWindow:
 
     def fetch_one(self, url: str, proxy_url: str) -> Dict[str, Any]:
         now_ts = time.time()
+        norm_input_url = normalize_onion_url(url) or url
+
         with self.lock:
-            if url in self.dead_blacklist:
+            if norm_input_url in self.dead_blacklist or url in self.dead_blacklist:
                 return {
-                    "url": url,
+                    "url": norm_input_url,
                     "status": "dead_blacklisted",
                     "ts": now_ts,
                     "lang": "en",
                     "category": "other",
                 }
-            self.in_progress_urls.add(url)
+            self.in_progress_urls.add(norm_input_url)
 
         page = self.fetcher.fetch_page(
             url, proxy_url, is_running_cb=lambda: self.running
         )
-        url_to_save: str = page.get("url", url)
+        raw_url_to_save: str = page.get("url", url)
+        norm_save_url: str = normalize_onion_url(raw_url_to_save) or raw_url_to_save
 
         if page.get("status") == "canceled" or not self.running:
             with self.lock:
-                self.in_progress_urls.discard(url)
-            return {"url": url, "status": "canceled", "ts": now_ts}
+                self.in_progress_urls.discard(norm_input_url)
+            return {"url": norm_save_url, "status": "canceled", "ts": now_ts}
 
         if page.get("status") == "dead":
             with self.lock:
-                self.in_progress_urls.discard(url)
-                self.dead_blacklist[url] = now_ts
-                self.pending_dead[url] = now_ts
-                if url not in self.checked_urls:
-                    self.checked_urls.add(url)
-                    if url not in self.pending_checked:
-                        self.pending_checked.append(url)
+                self.in_progress_urls.discard(norm_input_url)
+                self.dead_blacklist[norm_save_url] = now_ts
+                self.pending_dead[norm_save_url] = now_ts
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
             return page
 
         if page.get("status") == "empty":
             with self.lock:
-                self.in_progress_urls.discard(url)
-                if url not in self.checked_urls:
-                    self.checked_urls.add(url)
-                    if url not in self.pending_checked:
-                        self.pending_checked.append(url)
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
             return page
 
         fp: str = page.get("fp", "")
@@ -2358,14 +2385,14 @@ class MainWindow:
             )
             if not ok:
                 with self.lock:
-                    self.in_progress_urls.discard(url)
-                    if url not in self.checked_urls:
-                        self.checked_urls.add(url)
-                        if url not in self.pending_checked:
-                            self.pending_checked.append(url)
+                    self.in_progress_urls.discard(norm_input_url)
+                    if norm_save_url not in self.checked_urls:
+                        self.checked_urls.add(norm_save_url)
+                        if norm_save_url not in self.pending_checked:
+                            self.pending_checked.append(norm_save_url)
                     self.stats["filtered"] = self.stats.get("filtered", 0) + 1
                 return {
-                    "url": url_to_save,
+                    "url": norm_save_url,
                     "status": "filtered",
                     "reason": reason,
                     "ts": now_ts,
@@ -2373,22 +2400,19 @@ class MainWindow:
                     "category": category,
                 }
 
-        # Deduplication check 1: normalized URL already in self.results or checked
-        norm_save_url = normalize_onion_url(url_to_save) or url_to_save
+        # Deduplication check 1: O(1) set lookup in self.result_urls
         with self.lock:
-            url_already_in_results = any(
-                normalize_onion_url(r.get("url", "")) == norm_save_url for r in self.results
-            )
+            url_already_in_results = norm_save_url in self.result_urls
 
         if url_already_in_results:
             with self.lock:
-                self.in_progress_urls.discard(url)
-                if url not in self.checked_urls:
-                    self.checked_urls.add(url)
-                    if url not in self.pending_checked:
-                        self.pending_checked.append(url)
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
             return {
-                "url": url_to_save,
+                "url": norm_save_url,
                 "status": "clone",
                 "fp": fp,
                 "ts": now_ts,
@@ -2399,13 +2423,13 @@ class MainWindow:
         is_fp_duplicate, fp_orig = self.is_fp_seen(fp)
         if is_fp_duplicate:
             with self.lock:
-                self.in_progress_urls.discard(url)
-                if url not in self.checked_urls:
-                    self.checked_urls.add(url)
-                    if url not in self.pending_checked:
-                        self.pending_checked.append(url)
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
             return {
-                "url": url_to_save,
+                "url": norm_save_url,
                 "status": "clone",
                 "fp": fp,
                 "ts": now_ts,
@@ -2417,13 +2441,13 @@ class MainWindow:
             is_btc_duplicate, _ = self.is_btc_seen(b)
             if is_btc_duplicate:
                 with self.lock:
-                    self.in_progress_urls.discard(url)
-                    if url not in self.checked_urls:
-                        self.checked_urls.add(url)
-                        if url not in self.pending_checked:
-                            self.pending_checked.append(url)
+                    self.in_progress_urls.discard(norm_input_url)
+                    if norm_save_url not in self.checked_urls:
+                        self.checked_urls.add(norm_save_url)
+                        if norm_save_url not in self.pending_checked:
+                            self.pending_checked.append(norm_save_url)
                 return {
-                    "url": url_to_save,
+                    "url": norm_save_url,
                     "status": "clone_btc",
                     "ts": now_ts,
                     "lang": lang,
@@ -2431,16 +2455,16 @@ class MainWindow:
                 }
 
         with self.lock:
-            self.in_progress_urls.discard(url)
-            self._cache_fp(fp, url_to_save)
-            self.pending_fp[fp] = url_to_save
+            self.in_progress_urls.discard(norm_input_url)
+            self._cache_fp(fp, norm_save_url)
+            self.pending_fp[fp] = norm_save_url
             for b in btc:
-                self._cache_btc(b, url_to_save)
-                self.pending_btc[b] = url_to_save
+                self._cache_btc(b, norm_save_url)
+                self.pending_btc[b] = norm_save_url
 
             result = {
                 "title": title,
-                "url": url_to_save,
+                "url": norm_save_url,
                 "snippet": snippet,
                 "fp": fp,
                 "ts": now_ts,
@@ -2448,14 +2472,15 @@ class MainWindow:
                 "category": category,
             }
             self.results.append(result)
+            self.result_urls.add(norm_save_url)
             self.pending_results.append(result)
-            if url not in self.checked_urls:
-                self.checked_urls.add(url)
-            if url not in self.pending_checked:
-                self.pending_checked.append(url)
+            if norm_save_url not in self.checked_urls:
+                self.checked_urls.add(norm_save_url)
+            if norm_save_url not in self.pending_checked:
+                self.pending_checked.append(norm_save_url)
 
         return {
-            "url": url_to_save,
+            "url": norm_save_url,
             "status": "unique",
             "title": title,
             "snippet": snippet,

@@ -8,6 +8,7 @@ def test_normalize_onion_url():
     assert normalize_onion_url(f"http://{valid_host.upper()}") == f"http://{valid_host}"
     assert normalize_onion_url(f"https://{valid_host}/") == f"http://{valid_host}"
     assert normalize_onion_url(f"{valid_host}/path/to/page/?q=1#frag") == f"http://{valid_host}/path/to/page"
+    assert normalize_onion_url(f"{valid_host}/path/to/page/?q=1#frag", host_only=True) == f"http://{valid_host}"
     assert normalize_onion_url(f"http://{valid_host}/path///") == f"http://{valid_host}/path"
     # Invalid addresses
     assert normalize_onion_url("http://google.com") is None

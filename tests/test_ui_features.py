@@ -148,3 +148,64 @@ def test_main_window_tor_diagnostics(tmp_path):
     assert app.ctrl_port_var.get() == "9051"
 
     root.destroy()
+
+
+def test_settings_dialog_initialization_validation_and_save(tmp_path):
+    root = tk.Tk()
+    root.withdraw()
+
+    from onion_search.config import ConfigManager, AppConfig
+    from onion_search.ui.settings_dialog import SettingsDialog
+    from unittest.mock import patch
+
+    cfg_file = tmp_path / "config.json"
+    mgr = ConfigManager(config_file=cfg_file)
+
+    saved_callback_cfg = [None]
+    diag_called = [False]
+
+    def _on_save(c):
+        saved_callback_cfg[0] = c
+
+    def _on_diag():
+        diag_called[0] = True
+
+    dialog = SettingsDialog(
+        parent=root,
+        config_manager=mgr,
+        on_save_callback=_on_save,
+        on_run_diagnostics_callback=_on_diag,
+    )
+
+    assert dialog.socks_port_var.get() == "9050"
+    assert dialog.workers_var.get() == 6
+
+    # Test invalid validation
+    dialog.workers_var.set(99)  # Too large (max 20)
+    valid, err = dialog.validate_inputs()
+    assert valid is False
+    assert "Workers" in err
+
+    # Fix worker value and test valid apply
+    dialog.workers_var.set(8)
+    dialog.socks_port_var.set("9150")
+    dialog.tor_tcp_timeout_var.set(1.5)
+    applied = dialog.apply_changes()
+    assert applied is True
+    assert saved_callback_cfg[0] is not None
+    assert saved_callback_cfg[0].workers == 8
+    assert saved_callback_cfg[0].socks_port == "9150"
+    assert saved_callback_cfg[0].tor_tcp_timeout == 1.5
+
+    # Test diagnostics callback
+    dialog.run_diagnostics()
+    assert diag_called[0] is True
+
+    # Test reset to defaults
+    with patch("tkinter.messagebox.askyesno", return_value=True):
+        dialog.reset_to_defaults()
+        assert dialog.workers_var.get() == 6
+        assert dialog.socks_port_var.get() == "9050"
+
+    dialog.win.destroy()
+    root.destroy()

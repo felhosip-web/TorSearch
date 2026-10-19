@@ -150,6 +150,7 @@ class MainWindow:
         self.root.bind("<Control-Shift-BackSpace>", lambda e: self.panic_wipe())
         self.root.bind("<Control-Delete>", lambda e: self.panic_wipe())
         self.root.bind("<Control-KP_Delete>", lambda e: self.panic_wipe())
+        self.root.bind("<Control-comma>", lambda e: self.open_settings_dialog())
 
         # Prevent race conditions by scheduling startup diagnostics after MainWindow initialization
         self.root.after(
@@ -423,7 +424,12 @@ class MainWindow:
         file_menu.add_command(label="Kilépés", command=self.on_close)
         menubar.add_cascade(label="Fájl", menu=file_menu)
 
-        # 2. Keresés menü
+        # 2. Szerkesztés menü
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="⚙️ Beállítások... (Ctrl+,)", command=self.open_settings_dialog)
+        menubar.add_cascade(label="Szerkesztés", menu=edit_menu)
+
+        # 3. Keresés menü
         search_menu = tk.Menu(menubar, tearoff=0)
         search_menu.add_command(label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True))
         search_menu.add_command(label="🌱 Magok frissítése", command=lambda: self.update_seeds_thread())
@@ -433,7 +439,7 @@ class MainWindow:
         search_menu.add_command(label="🔄 NEWNYM most (Ctrl+N)", command=self.manual_newnym_thread)
         menubar.add_cascade(label="Keresés", menu=search_menu)
 
-        # 3. Eszközök menü
+        # 4. Eszközök menü
         tools_menu = tk.Menu(menubar, tearoff=0)
         tools_menu.add_command(
             label="🔍 Tor Diagnosztika és Auto-Beállítás...",
@@ -445,8 +451,10 @@ class MainWindow:
         tools_menu.add_command(label="🚨 Pánik törlés", command=self.panic_wipe)
         menubar.add_cascade(label="Eszközök", menu=tools_menu)
 
-        # 4. Beállítások menü
+        # 5. Beállítások menü
         settings_menu = tk.Menu(menubar, tearoff=0)
+        settings_menu.add_command(label="⚙️ Összes Beállítás... (Ctrl+,)", command=self.open_settings_dialog)
+        settings_menu.add_separator()
         settings_menu.add_command(label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True))
         settings_menu.add_command(label="🌐 Tor és Hálózat...", command=self.open_network_settings_dialog)
         settings_menu.add_command(label="💾 Tárolás & Adatbázis...", command=self.open_storage_settings_dialog)
@@ -472,6 +480,38 @@ class MainWindow:
         menubar.add_cascade(label="Súgó", menu=help_menu)
 
         self.root.config(menu=menubar)
+
+    def open_settings_dialog(self) -> None:
+        """Open comprehensive tabbed settings dialog."""
+        from onion_search.ui.settings_dialog import SettingsDialog
+
+        def _on_save(new_cfg: AppConfig) -> None:
+            self.port_var.set(new_cfg.socks_port)
+            self.ctrl_port_var.set(new_cfg.ctrl_port)
+            self.worker_var.set(new_cfg.workers)
+            self.backend_var.set(new_cfg.backend)
+            self.dark_mode_var.set(new_cfg.dark_mode)
+            self.auto_newnym_success_var.set(new_cfg.auto_newnym_success)
+            self.auto_newnym_total_var.set(new_cfg.auto_newnym_total)
+            self.success_threshold_var.set(new_cfg.success_threshold)
+            self.total_threshold_var.set(new_cfg.total_threshold)
+            self.auto_save_var.set(new_cfg.auto_save)
+            self.allow_clearnet_var.set(new_cfg.allow_clearnet)
+            self.encrypt_storage_var.set(new_cfg.encrypt_storage)
+            self.auto_seed_var.set(new_cfg.auto_update_seeds)
+            self.host_only_var.set(new_cfg.normalize_to_host_only)
+            self.tor_tcp_timeout_var.set(new_cfg.tor_tcp_timeout)
+            self.tor_socks_timeout_var.set(new_cfg.tor_socks_timeout)
+            self.apply_theme()
+
+        SettingsDialog(
+            parent=self.root,
+            config_manager=self.config_manager,
+            on_save_callback=_on_save,
+            on_run_diagnostics_callback=lambda: self.run_tor_diagnostics_thread(
+                show_dialog_on_success=True, force_full_scan=True
+            ),
+        )
 
     def open_extra_onions_dialog(self) -> None:
         """Modal dialog for editing extra .onion target addresses."""
@@ -674,7 +714,7 @@ class MainWindow:
             status_right, text="🔍 Diagnosztika", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True)
         ).pack(side=tk.LEFT, padx=2)
         ttk.Button(
-            status_right, text="⚙️", width=3, command=self.open_network_settings_dialog
+            status_right, text="⚙️", width=3, command=self.open_settings_dialog
         ).pack(side=tk.LEFT, padx=2)
 
         # 2. Filters panel component

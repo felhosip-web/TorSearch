@@ -51,6 +51,7 @@ DEFAULT_MAX_RETRIES: int = 2
 MAX_MEMORY_CACHE_SIZE: int = 50000
 
 # Tor Network Ports & Defaults
+DEFAULT_SOCKS_HOST: str = "127.0.0.1"
 DEFAULT_SOCKS_PORT: str = "9050"
 DEFAULT_CTRL_PORT: str = "9051"
 DEFAULT_WORKERS: int = 6
@@ -64,11 +65,25 @@ DEFAULT_TOR_SOCKS_TIMEOUT: float = 4.0
 DEFAULT_SUCCESS_THRESHOLD: int = 50
 DEFAULT_TOTAL_THRESHOLD: int = 100
 
+# Crawler & Content Defaults
+DEFAULT_MAX_CRAWL_DEPTH: int = 2
+DEFAULT_MAX_LINKS_PER_PAGE: int = 100
+DEFAULT_USER_AGENT_ROTATE: bool = True
+DEFAULT_LANGUAGE_FILTER: str = "all"
+DEFAULT_CATEGORY_FILTER: str = "all"
+DEFAULT_FINGERPRINT_SENSITIVITY: str = "medium"
+DEFAULT_DEAD_RECHECK_HOURS: float = 24.0
+DEFAULT_AUTO_CLEANUP_DEAD: bool = False
+DEFAULT_EXPORT_FORMAT: str = "csv"
+DEFAULT_AUTO_TOR_DIAGNOSTICS: bool = True
+DEFAULT_MINIMIZE_TO_TRAY: bool = False
+
 
 @dataclass
 class AppConfig:
     """Strongly typed application configuration settings."""
 
+    socks_host: str = DEFAULT_SOCKS_HOST
     socks_port: str = DEFAULT_SOCKS_PORT
     ctrl_port: str = DEFAULT_CTRL_PORT
     workers: int = DEFAULT_WORKERS
@@ -92,6 +107,17 @@ class AppConfig:
     normalize_to_host_only: bool = False
     tor_tcp_timeout: float = DEFAULT_TOR_TCP_TIMEOUT
     tor_socks_timeout: float = DEFAULT_TOR_SOCKS_TIMEOUT
+    max_crawl_depth: int = DEFAULT_MAX_CRAWL_DEPTH
+    max_links_per_page: int = DEFAULT_MAX_LINKS_PER_PAGE
+    user_agent_rotate: bool = DEFAULT_USER_AGENT_ROTATE
+    default_language: str = DEFAULT_LANGUAGE_FILTER
+    default_category: str = DEFAULT_CATEGORY_FILTER
+    fingerprint_sensitivity: str = DEFAULT_FINGERPRINT_SENSITIVITY
+    dead_link_recheck_hours: float = DEFAULT_DEAD_RECHECK_HOURS
+    auto_cleanup_dead: bool = DEFAULT_AUTO_CLEANUP_DEAD
+    export_default_format: str = DEFAULT_EXPORT_FORMAT
+    auto_tor_diagnostics_on_startup: bool = DEFAULT_AUTO_TOR_DIAGNOSTICS
+    minimize_to_tray: bool = DEFAULT_MINIMIZE_TO_TRAY
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":

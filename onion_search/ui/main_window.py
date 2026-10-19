@@ -127,6 +127,8 @@ class MainWindow:
         self.encrypt_storage_var = tk.BooleanVar(value=cfg.encrypt_storage)
         self.auto_seed_var = tk.BooleanVar(value=getattr(cfg, "auto_update_seeds", True))
         self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
+        self.tor_tcp_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_tcp_timeout", 2.0))
+        self.tor_socks_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_socks_timeout", 4.0))
         self.status_var = tk.StringVar(value="Készen - v4.9.4")
 
         # Build UI layout
@@ -148,8 +150,15 @@ class MainWindow:
         self.root.bind("<Control-Shift-BackSpace>", lambda e: self.panic_wipe())
         self.root.bind("<Control-Delete>", lambda e: self.panic_wipe())
         self.root.bind("<Control-KP_Delete>", lambda e: self.panic_wipe())
+        self.root.bind("<Control-comma>", lambda e: self.open_settings_dialog())
 
-        threading.Thread(target=self.check_tor_on_startup, daemon=True).start()
+        # Prevent race conditions by scheduling startup diagnostics after MainWindow initialization
+        self.root.after(
+            200,
+            lambda: self.run_tor_diagnostics_thread(
+                show_dialog_on_success=False, on_startup=True, force_full_scan=False
+            ),
+        )
         if self.auto_seed_var.get():
             threading.Thread(target=self.auto_seed_update_on_startup, daemon=True).start()
         try:
@@ -390,6 +399,8 @@ class MainWindow:
                 auto_update_seeds=self.auto_seed_var.get(),
                 queries=self.query_entry.get(),
                 normalize_to_host_only=self.host_only_var.get(),
+                tor_tcp_timeout=self.tor_tcp_timeout_var.get(),
+                tor_socks_timeout=self.tor_socks_timeout_var.get(),
             )
             self.config_manager.save(cfg)
         except Exception:
@@ -413,8 +424,14 @@ class MainWindow:
         file_menu.add_command(label="Kilépés", command=self.on_close)
         menubar.add_cascade(label="Fájl", menu=file_menu)
 
-        # 2. Keresés menü
+        # 2. Szerkesztés menü
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="⚙️ Beállítások... (Ctrl+,)", command=self.open_settings_dialog)
+        menubar.add_cascade(label="Szerkesztés", menu=edit_menu)
+
+        # 3. Keresés menü
         search_menu = tk.Menu(menubar, tearoff=0)
+        search_menu.add_command(label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True))
         search_menu.add_command(label="🌱 Magok frissítése", command=lambda: self.update_seeds_thread())
         search_menu.add_command(label="⚙️ Maglista kezelő...", command=self.open_seeds_dialog)
         search_menu.add_command(label="➕ Extra .onion címek...", command=self.open_extra_onions_dialog)
@@ -422,8 +439,23 @@ class MainWindow:
         search_menu.add_command(label="🔄 NEWNYM most (Ctrl+N)", command=self.manual_newnym_thread)
         menubar.add_cascade(label="Keresés", menu=search_menu)
 
-        # 3. Beállítások menü
+        # 4. Eszközök menü
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        tools_menu.add_command(
+            label="🔍 Tor Diagnosztika és Auto-Beállítás...",
+            command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True),
+        )
+        tools_menu.add_command(label="🌱 Maglista Frissítése", command=lambda: self.update_seeds_thread())
+        tools_menu.add_command(label="🔄 NEWNYM kérése (Ctrl+N)", command=self.manual_newnym_thread)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="🚨 Pánik törlés", command=self.panic_wipe)
+        menubar.add_cascade(label="Eszközök", menu=tools_menu)
+
+        # 5. Beállítások menü
         settings_menu = tk.Menu(menubar, tearoff=0)
+        settings_menu.add_command(label="⚙️ Összes Beállítás... (Ctrl+,)", command=self.open_settings_dialog)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True))
         settings_menu.add_command(label="🌐 Tor és Hálózat...", command=self.open_network_settings_dialog)
         settings_menu.add_command(label="💾 Tárolás & Adatbázis...", command=self.open_storage_settings_dialog)
         settings_menu.add_command(label="🔄 NEWNYM automatizálás...", command=self.open_newnym_settings_dialog)
@@ -448,6 +480,38 @@ class MainWindow:
         menubar.add_cascade(label="Súgó", menu=help_menu)
 
         self.root.config(menu=menubar)
+
+    def open_settings_dialog(self) -> None:
+        """Open comprehensive tabbed settings dialog."""
+        from onion_search.ui.settings_dialog import SettingsDialog
+
+        def _on_save(new_cfg: AppConfig) -> None:
+            self.port_var.set(new_cfg.socks_port)
+            self.ctrl_port_var.set(new_cfg.ctrl_port)
+            self.worker_var.set(new_cfg.workers)
+            self.backend_var.set(new_cfg.backend)
+            self.dark_mode_var.set(new_cfg.dark_mode)
+            self.auto_newnym_success_var.set(new_cfg.auto_newnym_success)
+            self.auto_newnym_total_var.set(new_cfg.auto_newnym_total)
+            self.success_threshold_var.set(new_cfg.success_threshold)
+            self.total_threshold_var.set(new_cfg.total_threshold)
+            self.auto_save_var.set(new_cfg.auto_save)
+            self.allow_clearnet_var.set(new_cfg.allow_clearnet)
+            self.encrypt_storage_var.set(new_cfg.encrypt_storage)
+            self.auto_seed_var.set(new_cfg.auto_update_seeds)
+            self.host_only_var.set(new_cfg.normalize_to_host_only)
+            self.tor_tcp_timeout_var.set(new_cfg.tor_tcp_timeout)
+            self.tor_socks_timeout_var.set(new_cfg.tor_socks_timeout)
+            self.apply_theme()
+
+        SettingsDialog(
+            parent=self.root,
+            config_manager=self.config_manager,
+            on_save_callback=_on_save,
+            on_run_diagnostics_callback=lambda: self.run_tor_diagnostics_thread(
+                show_dialog_on_success=True, force_full_scan=True
+            ),
+        )
 
     def open_extra_onions_dialog(self) -> None:
         """Modal dialog for editing extra .onion target addresses."""
@@ -474,10 +538,10 @@ class MainWindow:
         """Modal dialog for Tor network and proxy settings."""
         win = tk.Toplevel(self.root)
         win.title("🌐 Tor és Hálózat Beállítások")
-        win.geometry("450x300")
+        win.geometry("480x360")
         win.resizable(False, False)
 
-        ttk.Label(win, text="Tor Proxy Beállítások", font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=16, pady=(12, 4))
+        ttk.Label(win, text="Tor Proxy és Diagnosztikai Beállítások", font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=16, pady=(12, 4))
 
         f = ttk.Frame(win, padding=12)
         f.pack(fill=tk.BOTH, expand=True)
@@ -491,7 +555,13 @@ class MainWindow:
         ttk.Label(f, text="Szálak száma (Workers):").grid(row=2, column=0, sticky=tk.W, pady=4)
         ttk.Spinbox(f, from_=2, to=10, textvariable=self.worker_var, width=6).grid(row=2, column=1, sticky=tk.W, pady=4)
 
-        ttk.Checkbutton(f, text="Clearnet elérés engedélyezve", variable=self.allow_clearnet_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=6)
+        ttk.Label(f, text="TCP Port Timeout (mp):").grid(row=3, column=0, sticky=tk.W, pady=4)
+        ttk.Spinbox(f, from_=0.5, to=10.0, increment=0.5, textvariable=self.tor_tcp_timeout_var, width=6).grid(row=3, column=1, sticky=tk.W, pady=4)
+
+        ttk.Label(f, text="Tor SOCKS Timeout (mp):").grid(row=4, column=0, sticky=tk.W, pady=4)
+        ttk.Spinbox(f, from_=1.0, to=30.0, increment=0.5, textvariable=self.tor_socks_timeout_var, width=6).grid(row=4, column=1, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(f, text="Clearnet elérés engedélyezve", variable=self.allow_clearnet_var).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=6)
 
         def _save():
             self.save_current_config()
@@ -641,7 +711,10 @@ class MainWindow:
         self.lbl_tor_status.pack(side=tk.LEFT, padx=4)
 
         ttk.Button(
-            status_right, text="⚙️", width=3, command=self.open_network_settings_dialog
+            status_right, text="🔍 Diagnosztika", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True)
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            status_right, text="⚙️", width=3, command=self.open_settings_dialog
         ).pack(side=tk.LEFT, padx=2)
 
         # 2. Filters panel component
@@ -914,6 +987,9 @@ class MainWindow:
         self.context_menu.add_command(label="🗑 Törlés", command=self.delete_selected)
         self.context_menu.add_separator()
         self.context_menu.add_command(
+            label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True)
+        )
+        self.context_menu.add_command(
             label="🔄 NEWNYM most (Ctrl+N)", command=self.manual_newnym_thread
         )
         self.tree.bind("<Button-3>", self.show_context_menu)
@@ -958,18 +1034,30 @@ class MainWindow:
 
     def set_led(self, canvas: tk.Canvas, led_id: int, color: str) -> None:
         def _do():
-            canvas.itemconfig(led_id, fill=color)
+            try:
+                canvas.itemconfig(led_id, fill=color)
+            except Exception:
+                pass
 
-        self.root.after(0, _do)
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
 
     def set_statusbar_color(self, bg: str, fg: str = "white", msg: Optional[str] = None) -> None:
         def _do():
-            self.status_bar.config(bg=bg)
-            self.lbl_statusbar.config(bg=bg, fg=fg)
-            if msg:
-                self.status_var.set(msg)
+            try:
+                self.status_bar.config(bg=bg)
+                self.lbl_statusbar.config(bg=bg, fg=fg)
+                if msg:
+                    self.status_var.set(msg)
+            except Exception:
+                pass
 
-        self.root.after(0, _do)
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
 
     def apply_filters(self) -> None:
         """Refresh TreeView based on current quick and precise filters."""
@@ -1035,152 +1123,156 @@ class MainWindow:
             ),
         )
 
+    def run_tor_diagnostics_thread(
+        self,
+        show_dialog_on_success: bool = True,
+        on_startup: bool = False,
+        force_full_scan: bool = False,
+    ) -> None:
+        """
+        Run multi-step Tor diagnostic & auto-configuration in background thread.
+        Thread-safe execution prevents race conditions with main window loading.
+        """
+        try:
+            pref_port = self.port_var.get()
+            tcp_timeout = self.tor_tcp_timeout_var.get()
+            socks_timeout = self.tor_socks_timeout_var.get()
+        except Exception:
+            pref_port = "9050"
+            tcp_timeout = 2.0
+            socks_timeout = 4.0
+
+        def _bg() -> None:
+            self.set_statusbar_color("#f39c12", msg="🔍 Tor diagnosztika és beállítás...")
+            self.log_msg("[TOR DIAG] Tor kapcsolat-diagnosztika indítása...", force=True, tag="start")
+
+            diag = self.tor_controller.run_diagnostics(
+                preferred_port=pref_port,
+                tcp_timeout=tcp_timeout,
+                socks_timeout=socks_timeout,
+                force_full_scan=force_full_scan,
+            )
+
+            def _update_ui() -> None:
+                try:
+                    if not self.root.winfo_exists():
+                        return
+
+                    if diag["success"]:
+                        socks_port = diag["selected_socks_port"]
+                        ctrl_port = diag["selected_ctrl_port"]
+
+                        self.port_var.set(socks_port)
+                        self.ctrl_port_var.set(ctrl_port)
+                        self.save_current_config()
+
+                        self.set_led(self.canvas_socks, self.led_socks, "#2ecc71")
+                        ctrl_ok = diag["control_ports"].get(ctrl_port, {}).get("ok", False)
+                        if ctrl_ok:
+                            self.set_led(self.canvas_ctrl, self.led_ctrl, "#2ecc71")
+                        else:
+                            self.set_led(self.canvas_ctrl, self.led_ctrl, "#e67e22")
+
+                        act = diag.get("active_res")
+                        latency_str = f" ({act['latency_ms']:.0f} ms)" if act and act.get("latency_ms") else ""
+                        self.lbl_tor_status.config(
+                            text=f"Tor OK: {socks_port}{latency_str}",
+                            foreground="#27ae60",
+                        )
+                        self.set_statusbar_color(
+                            "#27ae60",
+                            msg=f"Tor proxy OK: 127.0.0.1:{socks_port}{latency_str}",
+                        )
+                        self.log_msg(diag["short_msg"], force=True, tag="tor_ok")
+
+                        if show_dialog_on_success and not on_startup:
+                            self.open_diagnostics_dialog(diag)
+                    else:
+                        self.set_led(self.canvas_socks, self.led_socks, "#e74c3c")
+                        self.set_led(self.canvas_ctrl, self.led_ctrl, "#e74c3c")
+                        self.lbl_tor_status.config(
+                            text="Tor: NEM elérhető", foreground="#c0392b"
+                        )
+                        self.set_statusbar_color(
+                            "#c0392b",
+                            msg="[!] Tor kapcsolat sikertelen — Kattints a [🔍 Diagnosztika] gombra!",
+                        )
+                        self.log_msg(
+                            f"[TOR DIAG HIBA]\n{diag['formatted_report']}",
+                            force=True,
+                            tag="tor_err",
+                        )
+                        self.open_diagnostics_dialog(diag)
+                except Exception:
+                    pass
+
+            try:
+                self.root.after(0, _update_ui)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def open_diagnostics_dialog(self, diag: Dict[str, Any]) -> None:
+        """Display detailed diagnostic feedback modal window."""
+        win = tk.Toplevel(self.root)
+        win.title("🔍 Tor Kapcsolat Diagnosztika & Auto-Beállítás")
+        win.geometry("620x520")
+
+        success = diag.get("success", False)
+        header_color = "#27ae60" if success else "#c0392b"
+        header_icon = "✓" if success else "!"
+        header_title = "Tor Kapcsolat Aktív" if success else "Tor Kapcsolat Sikertelen"
+
+        top_frame = tk.Frame(win, bg=header_color)
+        top_frame.pack(fill=tk.X)
+        tk.Label(
+            top_frame,
+            text=f"[{header_icon}] {header_title}",
+            font=("TkDefaultFont", 12, "bold"),
+            bg=header_color,
+            fg="white",
+            padx=10,
+            pady=10,
+        ).pack(anchor=tk.W)
+
+        body_frame = ttk.Frame(win, padding=12)
+        body_frame.pack(fill=tk.BOTH, expand=True)
+
+        txt = scrolledtext.ScrolledText(body_frame, height=18, font=("Consolas", 9))
+        txt.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        txt.insert(tk.END, diag.get("formatted_report", ""))
+        txt.config(state=tk.DISABLED)
+
+        btn_row = ttk.Frame(win, padding=(12, 0, 12, 12))
+        btn_row.pack(fill=tk.X)
+
+        ttk.Button(
+            btn_row,
+            text="🔄 Újrafuttatás",
+            command=lambda: (
+                win.destroy(),
+                self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True),
+            ),
+        ).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(
+            btn_row,
+            text="🌐 Beállítások...",
+            command=lambda: (win.destroy(), self.open_network_settings_dialog()),
+        ).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(
+            btn_row,
+            text="Bezárás",
+            command=win.destroy,
+        ).pack(side=tk.RIGHT, padx=4)
+
     def auto_detect_tor(self) -> None:
-        self.log_msg("[TOR AUTO-DETECT] Keresés 9050/9150...", force=True, tag="start")
-        self.set_statusbar_color("#f39c12", msg="Tor auto-detect 9050/9150...")
-
-        def _run() -> None:
-            socks_port, ok, msg = self.tor_controller.detect_working_tor(
-                preferred_port=self.port_var.get()
-            )
-            ctrl_map = {"9150": "9151", "9050": "9051"}
-            ctrl_port = ctrl_map.get(
-                socks_port, "9151" if socks_port == "9150" else "9051"
-            )
-            ctrl_ok, ctrl_msg = self.tor_controller.check_control(ctrl_port)
-            if not ctrl_ok:
-                other_ctrl = "9051" if ctrl_port == "9151" else "9151"
-                other_ok, other_msg = self.tor_controller.check_control(other_ctrl)
-                if other_ok:
-                    ctrl_port = other_ctrl
-                    ctrl_ok = True
-                    ctrl_msg = other_msg
-
-            self.root.after(0, lambda: self.port_var.set(socks_port))
-            self.root.after(0, lambda: self.ctrl_port_var.set(ctrl_port))
-            self.root.after(
-                0,
-                lambda: self.log_msg(
-                    f"[TOR AUTO] SOCKS={socks_port} ({msg}) CTRL={ctrl_port} ({ctrl_msg})",
-                    force=True,
-                    tag="tor_ok" if ok else "tor_err",
-                ),
-            )
-
-            def _update() -> None:
-                if ok:
-                    self.set_led(self.canvas_socks, self.led_socks, "#2ecc71")
-                else:
-                    self.set_led(self.canvas_socks, self.led_socks, "#e67e22")
-                if ctrl_ok:
-                    self.set_led(self.canvas_ctrl, self.led_ctrl, "#2ecc71")
-                else:
-                    self.set_led(self.canvas_ctrl, self.led_ctrl, "#e74c3c")
-                if ok and ctrl_ok:
-                    self.lbl_tor_status.config(
-                        text=f"Tor OK: SOCKS {socks_port} + Ctrl {ctrl_port}",
-                        foreground="#27ae60",
-                    )
-                    self.set_statusbar_color(
-                        "#27ae60",
-                        msg=f"AUTO OK: SOCKS {socks_port} + Ctrl {ctrl_port} - {msg}",
-                    )
-                elif ok:
-                    self.lbl_tor_status.config(
-                        text=f"Tor SOCKS OK ({socks_port}), Ctrl hiba ({ctrl_port})",
-                        foreground="#e67e22",
-                    )
-                    self.set_statusbar_color(
-                        "#e67e22", msg=f"SOCKS OK {socks_port}, de Ctrl {ctrl_port} hiba"
-                    )
-                else:
-                    self.lbl_tor_status.config(
-                        text="Tor NEM elérhető - Tor Browser fut?",
-                        foreground="#c0392b",
-                    )
-                    self.set_statusbar_color("#c0392b", msg=f"Tor hiba: {msg}")
-
-            self.root.after(0, _update)
-
-        threading.Thread(target=_run, daemon=True).start()
+        self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True)
 
     def check_tor_on_startup(self) -> None:
-        try:
-            time.sleep(0.8)
-            socks_port, ok, msg = self.tor_controller.detect_working_tor(
-                preferred_port=self.port_var.get()
-            )
-            if ok:
-                self.root.after(0, lambda: self.port_var.set(socks_port))
-                ctrl_map = {"9150": "9151", "9050": "9051"}
-                ctrl_port = ctrl_map.get(socks_port, self.ctrl_port_var.get())
-                self.root.after(0, lambda: self.ctrl_port_var.set(ctrl_port))
-            else:
-                socks_port = self.port_var.get()
-                ctrl_port = self.ctrl_port_var.get()
-
-            socks_ok, socks_msg = self.tor_controller.check_socks(socks_port)
-            if not socks_ok:
-                alt = "9150" if socks_port == "9050" else "9050"
-                alt_ok, alt_msg = self.tor_controller.check_socks(alt)
-                if alt_ok:
-                    socks_port = alt
-                    socks_ok = True
-                    socks_msg = alt_msg
-                    self.root.after(0, lambda: self.port_var.set(socks_port))
-
-            ctrl_ok, ctrl_msg = self.tor_controller.check_control(ctrl_port)
-            if not ctrl_ok:
-                alt_ctrl = "9151" if str(ctrl_port) == "9051" else "9051"
-                alt_ok, alt_msg = self.tor_controller.check_control(alt_ctrl)
-                if alt_ok:
-                    ctrl_port = alt_ctrl
-                    ctrl_ok = True
-                    ctrl_msg = alt_msg
-                    self.root.after(0, lambda: self.ctrl_port_var.set(ctrl_port))
-
-            self.log_msg(
-                f"[TOR CHECK] SOCKS {socks_port}: {socks_msg}",
-                force=True,
-                tag="tor_ok" if socks_ok else "tor_err",
-            )
-            self.log_msg(
-                f"[TOR CHECK] CTRL {ctrl_port}: {ctrl_msg}",
-                force=True,
-                tag="tor_ok" if ctrl_ok else "tor_err",
-            )
-
-            def _update() -> None:
-                if socks_ok:
-                    self.set_led(self.canvas_socks, self.led_socks, "#2ecc71")
-                else:
-                    self.set_led(self.canvas_socks, self.led_socks, "#e74c3c")
-                if ctrl_ok:
-                    self.set_led(self.canvas_ctrl, self.led_ctrl, "#2ecc71")
-                else:
-                    self.set_led(self.canvas_ctrl, self.led_ctrl, "#e74c3c")
-                if socks_ok and ctrl_ok:
-                    self.lbl_tor_status.config(
-                        text=f"Tor OK: SOCKS {socks_port} + Ctrl {ctrl_port}",
-                        foreground="#27ae60",
-                    )
-                    self.set_statusbar_color("#27ae60", msg=f"Tor OK - {socks_msg}")
-                elif socks_ok:
-                    self.lbl_tor_status.config(
-                        text="Tor SOCKS OK, Ctrl hiba", foreground="#e67e22"
-                    )
-                    self.set_statusbar_color(
-                        "#e67e22", msg=f"Tor SOCKS OK ({socks_port}), de {ctrl_msg}"
-                    )
-                else:
-                    self.lbl_tor_status.config(
-                        text="Tor NEM elérhető - Tor Browser fut?", foreground="#c0392b"
-                    )
-                    self.set_statusbar_color("#c0392b", msg=f"Tor hiba: {socks_msg}")
-
-            self.root.after(0, _update)
-        except Exception:
-            return
+        self.run_tor_diagnostics_thread(show_dialog_on_success=False, on_startup=True, force_full_scan=False)
 
     def on_backend_switch(self) -> None:
         backend: str = self.backend_var.get()

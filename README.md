@@ -181,6 +181,49 @@ class MyCustomSeedPlugin(BaseSeedPlugin):
 
 ---
 
+## 💾 Absztrakt Tároló Architektúra (Storage Layer)
+
+A tárolási réteg absztrakt, cserélhető architektúrára épül (`BaseStorage`), így a szoftver felkészült a skálázódásra több millió `.onion` cím kezelése esetén is.
+
+### Támogatott Tároló Backendek:
+- **`sqlite` (Alapértelmezett)**: Titkosított SQLite backend (Fernet + HMAC), PRAGMA WAL móddal, 5 mp-es busy timeout-tal, másodlagos indexekkel és batch műveletekkel (`executemany`).
+- **`json`**: Egyszerű JSON alapú fájltároló (kisebb tesztadatkészletekhez).
+- **`postgres` / `postgresql`**: Nagyléptékű vállalati skálázódáshoz előkészített PostgreSQL váz.
+
+### 🔌 Új Storage Backend Írása (Fejlesztői Útmutató):
+Egyedi tároló backend írásához származz a `BaseStorage` osztályból és regisztráld a `StorageFactory`-nál:
+
+```python
+from onion_search.storage import BaseStorage, StorageFactory
+
+class CustomSearchIndexStorage(BaseStorage):
+    def add_result(self, result: dict) -> bool:
+        ...
+
+    def add_results_batch(self, results: list) -> bool:
+        ...
+
+    def get_results(self, query=None, lang=None, category=None, limit=100, offset=0):
+        ...
+
+    def mark_dead(self, url: str, ts=None) -> None:
+        ...
+
+    def is_dead(self, url: str) -> bool:
+        ...
+
+    def get_stats(self) -> dict:
+        return {"backend": "custom_search"}
+
+    def cleanup_dead(self, cutoff_hours: float = 24.0) -> int:
+        ...
+
+# Regisztráció a StorageFactory-nál
+StorageFactory.register("custom", CustomSearchIndexStorage)
+```
+
+---
+
 ## 🛡️ Biztonsági architektúra és adatvédelem
 
 - **Kiszivárgás-megelőzés**: Ha a felhasználó nem engedélyezi kifejezetten a clearnet tükröket, a szoftver azonnal megtagad minden olyan kérést, amely nem `.onion` címre irányul vagy nincs aktív Tor proxy mögött.

@@ -12,35 +12,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-SQLite storage backend with optional Fernet cryptographic encryption for disk inspection protection.
+SQLite storage backend implementing BaseStorage abstract protocol with Fernet/HMAC encryption,
+WAL mode, busy_timeout locks, secondary indexing, and paginated query execution.
 Developed by HES Projects by FePe.
 """
 import hashlib
 import hmac
 import json
+import logging
 from pathlib import Path
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from onion_search.storage.base import BaseStorage
 from onion_search.storage.crypto import StorageEncryptor
 from onion_search.utils.helpers import DB_FILE
 
+logger = logging.getLogger("onion_search")
 
-class SQLiteBackend:
-    """SQLite persistence backend for search results, fingerprints, and state."""
+
+class SQLiteStorage(BaseStorage):
+    """
+    High-performance, encrypted SQLite storage backend implementing BaseStorage.
+    Supports WAL mode, 5s busy timeouts, batch operations, HMAC search keys,
+    and memory-efficient LIMIT/OFFSET pagination.
+    """
 
     def __init__(
         self,
         db_file: Union[str, Path] = DB_FILE,
         encrypt_storage: bool = False,
         encryptor: Optional[StorageEncryptor] = None,
+        **kwargs: Any,
     ) -> None:
         self.db_file = Path(db_file)
         self.db_file.parent.mkdir(parents=True, exist_ok=True)
         self.encrypt_storage = encrypt_storage
         self.encryptor = encryptor or (StorageEncryptor() if encrypt_storage else None)
         self.init_db()
+
+    def _get_connection(self, read_only: bool = False) -> sqlite3.Connection:
+        """Create configured sqlite3 connection with WAL mode and busy timeout."""
+        if read_only and self.db_file.exists():
+            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True, timeout=10.0)
+        else:
+            con = sqlite3.connect(self.db_file, timeout=10.0)
+        con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA synchronous=NORMAL;")
+        con.execute("PRAGMA busy_timeout=5000;")
+        return con
 
     def _enc_url(self, url: str) -> str:
         """Encrypt URL string if storage encryption is enabled, with keyed HMAC prefix for indexing."""
@@ -63,10 +84,7 @@ class SQLiteBackend:
             return stored
         try:
             parts = stored.split(":", 2)
-            if len(parts) == 3:
-                cipher = parts[2]
-            else:
-                cipher = parts[1]
+            cipher = parts[2] if len(parts) == 3 else parts[1]
             return self.encryptor.decrypt_bytes(cipher.encode("utf-8")).decode("utf-8")
         except Exception:
             return stored
@@ -79,9 +97,8 @@ class SQLiteBackend:
 
     def init_db(self) -> None:
         self.db_file.parent.mkdir(parents=True, exist_ok=True)
-        con = sqlite3.connect(self.db_file)
+        con = self._get_connection()
         cur = con.cursor()
-        cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute(
             "CREATE TABLE IF NOT EXISTS results ("
             "url TEXT PRIMARY KEY, title TEXT, snippet TEXT, fp TEXT, "
@@ -107,7 +124,7 @@ class SQLiteBackend:
         cur.execute("CREATE TABLE IF NOT EXISTS dead (url TEXT PRIMARY KEY, ts REAL)")
         cur.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
 
-        # Secondary indexes for fast filtering and lookups
+        # Secondary indexes for fast filtering, pagination, and lookups
         cur.execute("CREATE INDEX IF NOT EXISTS idx_results_ts ON results(ts DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_results_lang ON results(lang)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_results_cat ON results(category)")
@@ -118,12 +135,172 @@ class SQLiteBackend:
         con.commit()
         con.close()
 
+    def add_result(self, result: Dict[str, Any]) -> bool:
+        """Insert or update a single search result record."""
+        return self.add_results_batch([result])
+
+    def add_results_batch(self, results: List[Dict[str, Any]]) -> bool:
+        """Insert or update a batch of search result records atomically."""
+        if not results:
+            return True
+        con = self._get_connection()
+        cur = con.cursor()
+        try:
+            cur.execute("BEGIN")
+            params = [
+                (
+                    r["url"],
+                    r.get("title", ""),
+                    r.get("snippet", "")[:500],
+                    r.get("fp", ""),
+                    r.get("ts", time.time()),
+                    r.get("lang", "en"),
+                    r.get("category", "other"),
+                )
+                for r in results
+            ]
+            cur.executemany(
+                "INSERT OR REPLACE INTO results (url,title,snippet,fp,ts,lang,category) "
+                "VALUES (?,?,?,?,?,?,?)",
+                params,
+            )
+            con.commit()
+            con.close()
+            return True
+        except Exception as e:
+            logger.error(f"[SQLITE STORAGE] Error batch inserting results: {e}")
+            try:
+                con.rollback()
+                con.close()
+            except Exception:
+                pass
+            return False
+
+    def get_results(
+        self,
+        query: Optional[str] = None,
+        lang: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Query results with filtering and memory-efficient limit/offset pagination.
+        Returns tuple: (list of result dicts, total matching count).
+        """
+        if not self.db_file.exists():
+            return [], 0
+
+        con = self._get_connection(read_only=True)
+        cur = con.cursor()
+
+        where_clauses = []
+        sql_params: List[Any] = []
+
+        if lang and lang != "all":
+            where_clauses.append("lang = ?")
+            sql_params.append(lang)
+
+        if category and category != "all":
+            where_clauses.append("category = ?")
+            sql_params.append(category)
+
+        if query:
+            where_clauses.append("(title LIKE ? OR snippet LIKE ? OR url LIKE ?)")
+            q_pat = f"%{query}%"
+            sql_params.extend([q_pat, q_pat, q_pat])
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        # Total count query
+        count_sql = f"SELECT COUNT(*) FROM results{where_sql}"
+        cur.execute(count_sql, sql_params)
+        total_count = cur.fetchone()[0]
+
+        # Paginated data query
+        query_sql = (
+            f"SELECT url,title,snippet,fp,ts,lang,category FROM results"
+            f"{where_sql} ORDER BY ts DESC LIMIT ? OFFSET ?"
+        )
+        paginated_params = list(sql_params) + [limit, offset]
+        cur.execute(query_sql, paginated_params)
+
+        rows = cur.fetchall()
+        results = [
+            {
+                "url": r[0],
+                "title": r[1],
+                "snippet": r[2],
+                "fp": r[3],
+                "ts": r[4],
+                "lang": r[5] or "en",
+                "category": r[6] or "other",
+            }
+            for r in rows
+        ]
+        con.close()
+        return results, total_count
+
+    def mark_dead(self, url: str, ts: Optional[float] = None) -> None:
+        """Blacklist a dead URL."""
+        self.save_dead_pending({url: ts or time.time()})
+
+    def is_dead(self, url: str) -> bool:
+        """Check if URL is in dead blacklist."""
+        dead_map = self.load_dead()
+        return url in dead_map
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return database statistics."""
+        if not self.db_file.exists():
+            return {"active_results": 0, "dead_urls": 0, "db_size_bytes": 0}
+
+        try:
+            con = self._get_connection(read_only=True)
+            cur = con.cursor()
+            cur.execute("SELECT COUNT(*) FROM results")
+            active_cnt = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM dead")
+            dead_cnt = cur.fetchone()[0]
+            con.close()
+
+            db_size = self.db_file.stat().st_size if self.db_file.exists() else 0
+            return {
+                "backend": "sqlite",
+                "active_results": active_cnt,
+                "dead_urls": dead_cnt,
+                "db_size_bytes": db_size,
+                "db_file": str(self.db_file),
+                "journal_mode": "wal",
+                "encryption": self.encrypt_storage,
+            }
+        except Exception:
+            return {"backend": "sqlite", "active_results": 0, "dead_urls": 0}
+
+    def cleanup_dead(self, cutoff_hours: float = 24.0) -> int:
+        """Remove expired blacklisted dead links."""
+        try:
+            con = self._get_connection()
+            cur = con.cursor()
+            cutoff = time.time() - (cutoff_hours * 3600)
+            cur.execute("DELETE FROM dead WHERE ts < ?", (cutoff,))
+            deleted = cur.rowcount
+            con.commit()
+            con.close()
+            return deleted
+        except Exception:
+            return 0
+
+    def close(self) -> None:
+        """Close SQLite resources."""
+        pass
+
+    # Legacy contract compatibility methods
     def get_classification_by_fp(self, fp: str) -> Optional[Tuple[str, str]]:
-        """Query database for previously computed (lang, category) by content fingerprint."""
         if not self.db_file.exists() or not fp:
             return None
         try:
-            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+            con = self._get_connection(read_only=True)
             cur = con.cursor()
             cur.execute("SELECT lang, category FROM results WHERE fp = ? LIMIT 1", (fp,))
             row = cur.fetchone()
@@ -133,11 +310,10 @@ class SQLiteBackend:
             return None
 
     def get_fingerprint_url(self, fp: str) -> Optional[str]:
-        """Query database directly for an existing duplicate content fingerprint."""
         if not self.db_file.exists():
             return None
         try:
-            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+            con = self._get_connection(read_only=True)
             cur = con.cursor()
             cur.execute("SELECT url FROM fingerprints WHERE fp = ? LIMIT 1", (fp,))
             row = cur.fetchone()
@@ -147,11 +323,10 @@ class SQLiteBackend:
             return None
 
     def get_btc_url(self, btc: str) -> Optional[str]:
-        """Query database directly for an existing Bitcoin address mapping."""
         if not self.db_file.exists():
             return None
         try:
-            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+            con = self._get_connection(read_only=True)
             cur = con.cursor()
             cur.execute("SELECT url FROM btc_map WHERE btc = ? LIMIT 1", (btc,))
             row = cur.fetchone()
@@ -161,11 +336,10 @@ class SQLiteBackend:
             return None
 
     def is_url_checked(self, url: str) -> bool:
-        """Check if URL was already checked previously in the database."""
         if not self.db_file.exists():
             return False
         try:
-            con = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+            con = self._get_connection(read_only=True)
             cur = con.cursor()
             pattern = self._get_url_mac_pattern(url)
             cur.execute(
@@ -181,7 +355,7 @@ class SQLiteBackend:
     def load(self) -> Optional[Dict[str, Any]]:
         if not self.db_file.exists():
             return None
-        con = sqlite3.connect(self.db_file)
+        con = self._get_connection(read_only=True)
         cur = con.cursor()
         try:
             cur.execute("SELECT url,title,snippet,fp,ts,lang,category FROM results")
@@ -231,9 +405,8 @@ class SQLiteBackend:
             raise e
 
     def save(self, data: Dict[str, Any], incremental: bool = False) -> None:
-        con = sqlite3.connect(self.db_file)
+        con = self._get_connection()
         cur = con.cursor()
-        cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("BEGIN")
         for r in data.get("results", []):
             cur.execute(
@@ -287,9 +460,8 @@ class SQLiteBackend:
     def save_pending(self, pending: Dict[str, Any]) -> bool:
         if not pending:
             return True
-        con = sqlite3.connect(self.db_file)
+        con = self._get_connection()
         cur = con.cursor()
-        cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("BEGIN")
         for r in pending.get("results", []):
             cur.execute(
@@ -329,7 +501,7 @@ class SQLiteBackend:
         if not pending_dead:
             return
         try:
-            con = sqlite3.connect(self.db_file)
+            con = self._get_connection()
             cur = con.cursor()
             cur.execute("BEGIN")
             for url, ts in pending_dead.items():
@@ -337,16 +509,17 @@ class SQLiteBackend:
                     "INSERT OR REPLACE INTO dead (url,ts) VALUES (?,?)",
                     (self._enc_url(url), ts),
                 )
-            cur.execute("DELETE FROM dead WHERE ts < ?", (time.time() - 24 * 3600,))
             con.commit()
             con.close()
         except Exception:
             pass
 
     def load_dead(self) -> Dict[str, float]:
-        con = sqlite3.connect(self.db_file)
-        cur = con.cursor()
+        if not self.db_file.exists():
+            return {}
         try:
+            con = self._get_connection()
+            cur = con.cursor()
             now = time.time()
             cutoff = now - 24 * 3600
             cur.execute("DELETE FROM dead WHERE ts < ?", (cutoff,))
@@ -357,25 +530,10 @@ class SQLiteBackend:
             con.close()
             return d
         except Exception:
-            try:
-                con.close()
-            except Exception:
-                pass
             return {}
 
     def save_dead(self, dead_dict: Dict[str, float]) -> None:
         self.save_dead_pending(dead_dict)
-
-    def cleanup_dead(self) -> None:
-        try:
-            con = sqlite3.connect(self.db_file)
-            cur = con.cursor()
-            cutoff = time.time() - 24 * 3600
-            cur.execute("DELETE FROM dead WHERE ts < ?", (cutoff,))
-            con.commit()
-            con.close()
-        except Exception:
-            pass
 
     def clear(self) -> None:
         if self.db_file.exists():
@@ -391,3 +549,7 @@ class SQLiteBackend:
                 except Exception:
                     pass
         self.init_db()
+
+
+# Backward Compatibility Alias
+SQLiteBackend = SQLiteStorage

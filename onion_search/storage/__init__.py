@@ -12,11 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Storage backend module.
-Developed by HES Projects by FePe.
+Storage Layer Package for Onion Kereső.
+Provides abstract BaseStorage protocol, SQLiteStorage, JSONBackend, PostgresStorage skeleton, and StorageFactory.
 """
+from onion_search.storage.base import BaseStorage
 from onion_search.storage.crypto import StorageEncryptor
+from onion_search.storage.factory import StorageFactory
 from onion_search.storage.json_backend import JSONBackend
-from onion_search.storage.sqlite_backend import SQLiteBackend
+from onion_search.storage.postgres_skeleton import PostgresStorage
+from onion_search.storage.sqlite_backend import SQLiteBackend, SQLiteStorage
 
-__all__ = ["StorageEncryptor", "JSONBackend", "SQLiteBackend"]
+# Register standard backends with factory
+StorageFactory.register("sqlite", SQLiteStorage)
+StorageFactory.register("json", JSONBackend)
+StorageFactory.register("postgres", PostgresStorage)
+StorageFactory.register("postgresql", PostgresStorage)
+
+__all__ = [
+    "BaseStorage",
+    "SQLiteStorage",
+    "SQLiteBackend",
+    "JSONBackend",
+    "PostgresStorage",
+    "StorageEncryptor",
+    "StorageFactory",
+]

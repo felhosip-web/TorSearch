@@ -89,6 +89,7 @@ class AppConfig:
     ctrl_port: str = DEFAULT_CTRL_PORT
     workers: int = DEFAULT_WORKERS
     backend: str = DEFAULT_BACKEND
+    storage_backend: str = DEFAULT_BACKEND
     dark_mode: bool = True
     auto_newnym_success: bool = True
     auto_newnym_total: bool = True

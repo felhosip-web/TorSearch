@@ -167,11 +167,19 @@ class MainWindow:
             pass
 
     def get_backend(self) -> Any:
-        backend = (
-            self.sqlite_backend
-            if self.backend_var.get() == "sqlite"
-            else self.json_backend
-        )
+        backend_type = self.backend_var.get()
+        if backend_type == "sqlite":
+            backend = self.sqlite_backend
+        elif backend_type == "json":
+            backend = self.json_backend
+        else:
+            from onion_search.storage.factory import StorageFactory
+            backend = StorageFactory.create(
+                backend_type,
+                db_file=DB_FILE,
+                encrypt_storage=self.encrypt_storage_var.get(),
+            )
+
         if hasattr(backend, "encrypt_storage"):
             backend.encrypt_storage = self.encrypt_storage_var.get()
             if backend.encrypt_storage and getattr(backend, "encryptor", None) is None:

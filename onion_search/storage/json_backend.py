@@ -12,32 +12,104 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-JSON storage backend with optional Fernet cryptographic encryption for disk inspection protection.
+JSON storage backend implementing BaseStorage abstract protocol with optional Fernet encryption.
 Developed by HES Projects by FePe.
 """
 import json
 from pathlib import Path
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+from onion_search.storage.base import BaseStorage
 from onion_search.storage.crypto import StorageEncryptor
 from onion_search.utils.helpers import DEAD_FILE, STATE_FILE
 
 
-class JSONBackend:
-    """JSON file persistence backend with optional Fernet encryption."""
+class JSONBackend(BaseStorage):
+    """JSON file persistence backend implementing BaseStorage protocol."""
 
     def __init__(
         self,
-        state_file: Path = STATE_FILE,
-        dead_file: Path = DEAD_FILE,
+        state_file: Union[str, Path] = STATE_FILE,
+        dead_file: Union[str, Path] = DEAD_FILE,
         encrypt_storage: bool = False,
         encryptor: Optional[StorageEncryptor] = None,
+        **kwargs: Any,
     ) -> None:
         self.state_file = Path(state_file)
         self.dead_file = Path(dead_file)
         self.encrypt_storage = encrypt_storage
         self.encryptor = encryptor or (StorageEncryptor() if encrypt_storage else None)
+
+    def add_result(self, result: Dict[str, Any]) -> bool:
+        return self.add_results_batch([result])
+
+    def add_results_batch(self, results: List[Dict[str, Any]]) -> bool:
+        data = self.load() or {"results": []}
+        data_results = data.get("results", [])
+        existing_urls = {r.get("url") for r in data_results}
+        for r in results:
+            if r.get("url") not in existing_urls:
+                data_results.append(r)
+                existing_urls.add(r.get("url"))
+        data["results"] = data_results
+        self.save(data)
+        return True
+
+    def get_results(
+        self,
+        query: Optional[str] = None,
+        lang: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        data = self.load() or {}
+        results = data.get("results", [])
+        if lang and lang != "all":
+            results = [r for r in results if r.get("lang") == lang]
+        if category and category != "all":
+            results = [r for r in results if r.get("category") == category]
+        if query:
+            q_lower = query.lower()
+            results = [
+                r for r in results
+                if q_lower in r.get("title", "").lower() or q_lower in r.get("snippet", "").lower()
+            ]
+        total = len(results)
+        paginated = results[offset : offset + limit]
+        return paginated, total
+
+    def mark_dead(self, url: str, ts: Optional[float] = None) -> None:
+        dead = self.load_dead()
+        dead[url] = ts or time.time()
+        self.save_dead(dead)
+
+    def is_dead(self, url: str) -> bool:
+        dead = self.load_dead()
+        return url in dead
+
+    def get_stats(self) -> Dict[str, Any]:
+        data = self.load() or {}
+        results = data.get("results", [])
+        dead = self.load_dead()
+        size = self.state_file.stat().st_size if self.state_file.exists() else 0
+        return {
+            "backend": "json",
+            "active_results": len(results),
+            "dead_urls": len(dead),
+            "db_size_bytes": size,
+            "encryption": self.encrypt_storage,
+        }
+
+    def cleanup_dead(self, cutoff_hours: float = 24.0) -> int:
+        dead = self.load_dead()
+        now = time.time()
+        cutoff = now - (cutoff_hours * 3600)
+        filtered = {u: t for u, t in dead.items() if t >= cutoff}
+        cleaned_cnt = len(dead) - len(filtered)
+        self.save_dead(filtered)
+        return cleaned_cnt
 
     def load(self) -> Optional[Dict[str, Any]]:
         if not self.state_file.exists():

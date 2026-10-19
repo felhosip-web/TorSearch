@@ -127,6 +127,8 @@ class MainWindow:
         self.encrypt_storage_var = tk.BooleanVar(value=cfg.encrypt_storage)
         self.auto_seed_var = tk.BooleanVar(value=getattr(cfg, "auto_update_seeds", True))
         self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
+        self.tor_tcp_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_tcp_timeout", 2.0))
+        self.tor_socks_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_socks_timeout", 4.0))
         self.status_var = tk.StringVar(value="Készen - v4.9.4")
 
         # Build UI layout
@@ -149,10 +151,13 @@ class MainWindow:
         self.root.bind("<Control-Delete>", lambda e: self.panic_wipe())
         self.root.bind("<Control-KP_Delete>", lambda e: self.panic_wipe())
 
-        threading.Thread(
-            target=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=False, on_startup=True),
-            daemon=True,
-        ).start()
+        # Prevent race conditions by scheduling startup diagnostics after MainWindow initialization
+        self.root.after(
+            200,
+            lambda: self.run_tor_diagnostics_thread(
+                show_dialog_on_success=False, on_startup=True, force_full_scan=False
+            ),
+        )
         if self.auto_seed_var.get():
             threading.Thread(target=self.auto_seed_update_on_startup, daemon=True).start()
         try:
@@ -393,6 +398,8 @@ class MainWindow:
                 auto_update_seeds=self.auto_seed_var.get(),
                 queries=self.query_entry.get(),
                 normalize_to_host_only=self.host_only_var.get(),
+                tor_tcp_timeout=self.tor_tcp_timeout_var.get(),
+                tor_socks_timeout=self.tor_socks_timeout_var.get(),
             )
             self.config_manager.save(cfg)
         except Exception:
@@ -418,7 +425,7 @@ class MainWindow:
 
         # 2. Keresés menü
         search_menu = tk.Menu(menubar, tearoff=0)
-        search_menu.add_command(label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True))
+        search_menu.add_command(label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True))
         search_menu.add_command(label="🌱 Magok frissítése", command=lambda: self.update_seeds_thread())
         search_menu.add_command(label="⚙️ Maglista kezelő...", command=self.open_seeds_dialog)
         search_menu.add_command(label="➕ Extra .onion címek...", command=self.open_extra_onions_dialog)
@@ -426,9 +433,21 @@ class MainWindow:
         search_menu.add_command(label="🔄 NEWNYM most (Ctrl+N)", command=self.manual_newnym_thread)
         menubar.add_cascade(label="Keresés", menu=search_menu)
 
-        # 3. Beállítások menü
+        # 3. Eszközök menü
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        tools_menu.add_command(
+            label="🔍 Tor Diagnosztika és Auto-Beállítás...",
+            command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True),
+        )
+        tools_menu.add_command(label="🌱 Maglista Frissítése", command=lambda: self.update_seeds_thread())
+        tools_menu.add_command(label="🔄 NEWNYM kérése (Ctrl+N)", command=self.manual_newnym_thread)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="🚨 Pánik törlés", command=self.panic_wipe)
+        menubar.add_cascade(label="Eszközök", menu=tools_menu)
+
+        # 4. Beállítások menü
         settings_menu = tk.Menu(menubar, tearoff=0)
-        settings_menu.add_command(label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True))
+        settings_menu.add_command(label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True))
         settings_menu.add_command(label="🌐 Tor és Hálózat...", command=self.open_network_settings_dialog)
         settings_menu.add_command(label="💾 Tárolás & Adatbázis...", command=self.open_storage_settings_dialog)
         settings_menu.add_command(label="🔄 NEWNYM automatizálás...", command=self.open_newnym_settings_dialog)
@@ -479,10 +498,10 @@ class MainWindow:
         """Modal dialog for Tor network and proxy settings."""
         win = tk.Toplevel(self.root)
         win.title("🌐 Tor és Hálózat Beállítások")
-        win.geometry("450x300")
+        win.geometry("480x360")
         win.resizable(False, False)
 
-        ttk.Label(win, text="Tor Proxy Beállítások", font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=16, pady=(12, 4))
+        ttk.Label(win, text="Tor Proxy és Diagnosztikai Beállítások", font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=16, pady=(12, 4))
 
         f = ttk.Frame(win, padding=12)
         f.pack(fill=tk.BOTH, expand=True)
@@ -496,7 +515,13 @@ class MainWindow:
         ttk.Label(f, text="Szálak száma (Workers):").grid(row=2, column=0, sticky=tk.W, pady=4)
         ttk.Spinbox(f, from_=2, to=10, textvariable=self.worker_var, width=6).grid(row=2, column=1, sticky=tk.W, pady=4)
 
-        ttk.Checkbutton(f, text="Clearnet elérés engedélyezve", variable=self.allow_clearnet_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=6)
+        ttk.Label(f, text="TCP Port Timeout (mp):").grid(row=3, column=0, sticky=tk.W, pady=4)
+        ttk.Spinbox(f, from_=0.5, to=10.0, increment=0.5, textvariable=self.tor_tcp_timeout_var, width=6).grid(row=3, column=1, sticky=tk.W, pady=4)
+
+        ttk.Label(f, text="Tor SOCKS Timeout (mp):").grid(row=4, column=0, sticky=tk.W, pady=4)
+        ttk.Spinbox(f, from_=1.0, to=30.0, increment=0.5, textvariable=self.tor_socks_timeout_var, width=6).grid(row=4, column=1, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(f, text="Clearnet elérés engedélyezve", variable=self.allow_clearnet_var).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=6)
 
         def _save():
             self.save_current_config()
@@ -646,7 +671,7 @@ class MainWindow:
         self.lbl_tor_status.pack(side=tk.LEFT, padx=4)
 
         ttk.Button(
-            status_right, text="🔍 Diagnosztika", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True)
+            status_right, text="🔍 Diagnosztika", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True)
         ).pack(side=tk.LEFT, padx=2)
         ttk.Button(
             status_right, text="⚙️", width=3, command=self.open_network_settings_dialog
@@ -922,7 +947,7 @@ class MainWindow:
         self.context_menu.add_command(label="🗑 Törlés", command=self.delete_selected)
         self.context_menu.add_separator()
         self.context_menu.add_command(
-            label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True)
+            label="🔍 Tor Diagnosztika...", command=lambda: self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True)
         )
         self.context_menu.add_command(
             label="🔄 NEWNYM most (Ctrl+N)", command=self.manual_newnym_thread
@@ -1059,26 +1084,40 @@ class MainWindow:
         )
 
     def run_tor_diagnostics_thread(
-        self, show_dialog_on_success: bool = True, on_startup: bool = False
+        self,
+        show_dialog_on_success: bool = True,
+        on_startup: bool = False,
+        force_full_scan: bool = False,
     ) -> None:
         """
         Run multi-step Tor diagnostic & auto-configuration in background thread.
+        Thread-safe execution prevents race conditions with main window loading.
         """
         try:
             pref_port = self.port_var.get()
+            tcp_timeout = self.tor_tcp_timeout_var.get()
+            socks_timeout = self.tor_socks_timeout_var.get()
         except Exception:
             pref_port = "9050"
+            tcp_timeout = 2.0
+            socks_timeout = 4.0
 
         def _bg() -> None:
             self.set_statusbar_color("#f39c12", msg="🔍 Tor diagnosztika és beállítás...")
             self.log_msg("[TOR DIAG] Tor kapcsolat-diagnosztika indítása...", force=True, tag="start")
 
             diag = self.tor_controller.run_diagnostics(
-                preferred_port=pref_port, timeout=3.5
+                preferred_port=pref_port,
+                tcp_timeout=tcp_timeout,
+                socks_timeout=socks_timeout,
+                force_full_scan=force_full_scan,
             )
 
             def _update_ui() -> None:
                 try:
+                    if not self.root.winfo_exists():
+                        return
+
                     if diag["success"]:
                         socks_port = diag["selected_socks_port"]
                         ctrl_port = diag["selected_ctrl_port"]
@@ -1171,7 +1210,10 @@ class MainWindow:
         ttk.Button(
             btn_row,
             text="🔄 Újrafuttatás",
-            command=lambda: (win.destroy(), self.run_tor_diagnostics_thread(show_dialog_on_success=True)),
+            command=lambda: (
+                win.destroy(),
+                self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True),
+            ),
         ).pack(side=tk.LEFT, padx=4)
 
         ttk.Button(
@@ -1187,10 +1229,10 @@ class MainWindow:
         ).pack(side=tk.RIGHT, padx=4)
 
     def auto_detect_tor(self) -> None:
-        self.run_tor_diagnostics_thread(show_dialog_on_success=True)
+        self.run_tor_diagnostics_thread(show_dialog_on_success=True, force_full_scan=True)
 
     def check_tor_on_startup(self) -> None:
-        self.run_tor_diagnostics_thread(show_dialog_on_success=False, on_startup=True)
+        self.run_tor_diagnostics_thread(show_dialog_on_success=False, on_startup=True, force_full_scan=False)
 
     def on_backend_switch(self) -> None:
         backend: str = self.backend_var.get()

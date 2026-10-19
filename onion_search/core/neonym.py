@@ -211,20 +211,19 @@ def check_control_port(ctrl_port):
         return False, f"Control hiba: {e}"
 
 
-def probe_tor_socks_port(port, timeout=4.0):
+def probe_tor_socks_port(port, tcp_timeout=2.0, socks_timeout=4.0):
     """
     Perform step-by-step diagnostic on a SOCKS port:
-    1. TCP socket reachability test (127.0.0.1:port)
-    2. Real Tor connection test via check.torproject.org/api/ip
+    1. TCP socket reachability test (127.0.0.1:port) with configurable tcp_timeout.
+    2. Real Tor connection test via check.torproject.org/api/ip with configurable socks_timeout.
     3. Response latency measurement and IsTor verification.
     """
     port_str = str(port)
-    req_start = time.perf_counter()
 
     # Step 1: TCP Port reachability check
     try:
         s = socket.socket()
-        s.settimeout(min(timeout, 2.0))
+        s.settimeout(tcp_timeout)
         s.connect(("127.0.0.1", int(port)))
         s.close()
     except Exception as e:
@@ -254,7 +253,11 @@ def probe_tor_socks_port(port, timeout=4.0):
     }
     http_start = time.perf_counter()
     try:
-        r = requests.get("https://check.torproject.org/api/ip", proxies=proxies, timeout=timeout)
+        r = requests.get(
+            "https://check.torproject.org/api/ip",
+            proxies=proxies,
+            timeout=socks_timeout,
+        )
         latency_ms = (time.perf_counter() - http_start) * 1000.0
 
         if r.status_code == 200:
@@ -313,23 +316,93 @@ def probe_tor_socks_port(port, timeout=4.0):
         }
 
 
-def run_tor_diagnostics(preferred_port="9050", timeout=3.5):
+def run_tor_diagnostics(
+    preferred_port="9050",
+    tcp_timeout=2.0,
+    socks_timeout=4.0,
+    force_full_scan=False,
+):
     """
-    Run full multi-step Tor connectivity diagnostics:
-    1. Probe SOCKS ports 9050 (system Tor) and 9150 (Tor Browser).
-    2. Measure response time and verify IsTor status.
-    3. Probe ControlPorts 9051 and 9151.
-    4. Auto-configure best working port (preferring 9050 if both work).
-    5. Return structured diagnostic results and formatted report.
+    Run multi-step Tor connectivity diagnostics:
+    1. First probe preferred_port (last working or user configured port).
+    2. If preferred_port works and force_full_scan is False -> fast-path return.
+    3. If preferred_port fails or force_full_scan is True -> full probe of all candidate ports (9050, 9150).
+    4. Auto-select working port (preferring 9050 if both work).
     """
-    res_9050 = probe_tor_socks_port(9050, timeout=timeout)
-    res_9150 = probe_tor_socks_port(9150, timeout=timeout)
+    pref_str = str(preferred_port or "9050")
+    candidate_ports = ["9050", "9150"]
+    if pref_str not in candidate_ports:
+        candidate_ports.insert(0, pref_str)
+
+    res_ports = {}
+
+    # Fast-path check of preferred_port
+    pref_res = probe_tor_socks_port(
+        pref_str, tcp_timeout=tcp_timeout, socks_timeout=socks_timeout
+    )
+    res_ports[pref_str] = pref_res
+
+    if pref_res["socks_ok"] and pref_res["is_tor"] and not force_full_scan:
+        # Fast-path success!
+        selected_socks_port = pref_str
+        ctrl_map = {"9050": 9051, "9150": 9151}
+        pref_ctrl = ctrl_map.get(pref_str, 9051)
+        ctrl_ok, ctrl_msg = check_control_port(pref_ctrl)
+        selected_ctrl_port = str(pref_ctrl)
+
+        for p in candidate_ports:
+            if p != pref_str and p not in res_ports:
+                res_ports[p] = {
+                    "port": p,
+                    "tcp_open": None,
+                    "socks_ok": None,
+                    "is_tor": None,
+                    "latency_ms": None,
+                    "ip": None,
+                    "error": None,
+                    "status_str": "kihagyva (a preferált port működik)",
+                }
+
+        active_res = pref_res
+        short_msg = (
+            f"[✓] Tor kapcsolat aktív — Használt port: 127.0.0.1:{selected_socks_port} "
+            f"(Válaszidő: {active_res['latency_ms']:.0f} ms)"
+        )
+        formatted_report = (
+            f"[✓] Tor kapcsolat sikeresen felépült (Preferált port: 127.0.0.1:{selected_socks_port})!\n\n"
+            f"Diagnosztika eredménye:\n"
+            f"  • 127.0.0.1:{selected_socks_port} → {active_res['status_str']}\n"
+            f"  • ControlPort {selected_ctrl_port} → {ctrl_msg}\n\n"
+            f"Automatikus beállítás:\n"
+            f"  • Aktív proxy: 127.0.0.1:{selected_socks_port}\n"
+            f"  • Válaszidő: {active_res['latency_ms']:.0f} ms\n"
+            f"  • Tor IP: {active_res['ip'] or 'Ismeretlen'}\n"
+        )
+        return {
+            "success": True,
+            "selected_socks_port": selected_socks_port,
+            "selected_ctrl_port": selected_ctrl_port,
+            "short_msg": short_msg,
+            "formatted_report": formatted_report,
+            "ports": res_ports,
+            "control_ports": {
+                selected_ctrl_port: {"ok": ctrl_ok, "msg": ctrl_msg}
+            },
+            "active_res": active_res,
+        }
+
+    # Full scan: probe remaining ports
+    for p in ["9050", "9150"]:
+        if p not in res_ports:
+            res_ports[p] = probe_tor_socks_port(
+                p, tcp_timeout=tcp_timeout, socks_timeout=socks_timeout
+            )
 
     ctrl_ok_9051, ctrl_msg_9051 = check_control_port(9051)
     ctrl_ok_9151, ctrl_msg_9151 = check_control_port(9151)
 
-    ok_9050 = res_9050["socks_ok"] and res_9050["is_tor"]
-    ok_9150 = res_9150["socks_ok"] and res_9150["is_tor"]
+    ok_9050 = res_ports.get("9050", {}).get("socks_ok") and res_ports.get("9050", {}).get("is_tor")
+    ok_9150 = res_ports.get("9150", {}).get("socks_ok") and res_ports.get("9150", {}).get("is_tor")
 
     selected_socks_port = None
     selected_ctrl_port = "9051"
@@ -338,13 +411,16 @@ def run_tor_diagnostics(preferred_port="9050", timeout=3.5):
     if ok_9050:
         selected_socks_port = "9050"
         selected_ctrl_port = "9051" if ctrl_ok_9051 or not ctrl_ok_9151 else "9151"
-        active_res = res_9050
+        active_res = res_ports["9050"]
     elif ok_9150:
         selected_socks_port = "9150"
         selected_ctrl_port = "9151" if ctrl_ok_9151 or not ctrl_ok_9051 else "9051"
-        active_res = res_9150
+        active_res = res_ports["9150"]
 
     success = selected_socks_port is not None
+
+    status_9050 = res_ports.get("9050", {}).get("status_str", "ismeretlen")
+    status_9150 = res_ports.get("9150", {}).get("status_str", "ismeretlen")
 
     if success and active_res:
         short_msg = (
@@ -354,8 +430,8 @@ def run_tor_diagnostics(preferred_port="9050", timeout=3.5):
         formatted_report = (
             f"[✓] Tor kapcsolat sikeresen felépült!\n\n"
             f"Diagnosztika eredménye:\n"
-            f"  • 127.0.0.1:9050 (rendszer Tor) → {res_9050['status_str']}\n"
-            f"  • 127.0.0.1:9150 (Tor Browser)  → {res_9150['status_str']}\n"
+            f"  • 127.0.0.1:9050 (rendszer Tor) → {status_9050}\n"
+            f"  • 127.0.0.1:9150 (Tor Browser)  → {status_9150}\n"
             f"  • ControlPort 9051 → {ctrl_msg_9051}\n"
             f"  • ControlPort 9151 → {ctrl_msg_9151}\n\n"
             f"Automatikus beállítás:\n"
@@ -368,8 +444,8 @@ def run_tor_diagnostics(preferred_port="9050", timeout=3.5):
         formatted_report = (
             f"[!] Tor kapcsolat sikertelen\n\n"
             f"Diagnosztika eredménye:\n"
-            f"  • 127.0.0.1:9050  → {res_9050['status_str']}\n"
-            f"  • 127.0.0.1:9150  → {res_9150['status_str']}\n"
+            f"  • 127.0.0.1:9050  → {status_9050}\n"
+            f"  • 127.0.0.1:9150  → {status_9150}\n"
             f"  • ControlPort 9051 → {ctrl_msg_9051}\n"
             f"  • ControlPort 9151 → {ctrl_msg_9151}\n\n"
             f"Lehetséges okok és megoldások:\n"
@@ -389,10 +465,7 @@ def run_tor_diagnostics(preferred_port="9050", timeout=3.5):
         "selected_ctrl_port": selected_ctrl_port,
         "short_msg": short_msg,
         "formatted_report": formatted_report,
-        "ports": {
-            "9050": res_9050,
-            "9150": res_9150,
-        },
+        "ports": res_ports,
         "control_ports": {
             "9051": {"ok": ctrl_ok_9051, "msg": ctrl_msg_9051},
             "9151": {"ok": ctrl_ok_9151, "msg": ctrl_msg_9151},
@@ -408,9 +481,20 @@ class TorController:
         self.on_sessions_reset = on_sessions_reset
         self.last_newnym = 0
 
-    def run_diagnostics(self, preferred_port="9050", timeout=3.5):
+    def run_diagnostics(
+        self,
+        preferred_port="9050",
+        tcp_timeout=2.0,
+        socks_timeout=4.0,
+        force_full_scan=False,
+    ):
         """Run complete Tor diagnostic test and auto-select active proxy."""
-        return run_tor_diagnostics(preferred_port=preferred_port, timeout=timeout)
+        return run_tor_diagnostics(
+            preferred_port=preferred_port,
+            tcp_timeout=tcp_timeout,
+            socks_timeout=socks_timeout,
+            force_full_scan=force_full_scan,
+        )
 
     def detect_working_tor(self, preferred_port="9050"):
         """Probe available SOCKS ports (9150, 9050, or preferred) for active Tor."""

@@ -56,6 +56,10 @@ DEFAULT_CTRL_PORT: str = "9051"
 DEFAULT_WORKERS: int = 6
 DEFAULT_BACKEND: str = "sqlite"
 
+# Diagnostic Timeouts
+DEFAULT_TOR_TCP_TIMEOUT: float = 2.0
+DEFAULT_TOR_SOCKS_TIMEOUT: float = 4.0
+
 # Auto-NEWNYM thresholds
 DEFAULT_SUCCESS_THRESHOLD: int = 50
 DEFAULT_TOTAL_THRESHOLD: int = 100
@@ -86,6 +90,8 @@ class AppConfig:
     domain_delay: float = DEFAULT_DOMAIN_DELAY
     queries: str = "forum, board, wiki, library"
     normalize_to_host_only: bool = False
+    tor_tcp_timeout: float = DEFAULT_TOR_TCP_TIMEOUT
+    tor_socks_timeout: float = DEFAULT_TOR_SOCKS_TIMEOUT
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":

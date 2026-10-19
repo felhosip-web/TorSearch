@@ -133,7 +133,14 @@ def test_main_window_tor_diagnostics(tmp_path):
         tor_controller=mock_tor_controller,
     )
 
-    app.run_tor_diagnostics_thread(show_dialog_on_success=False)
+    assert app.tor_tcp_timeout_var.get() == 2.0
+    assert app.tor_socks_timeout_var.get() == 4.0
+
+    app.tor_tcp_timeout_var.set(3.0)
+    app.tor_socks_timeout_var.set(6.0)
+    app.save_current_config()
+
+    app.run_tor_diagnostics_thread(show_dialog_on_success=False, force_full_scan=True)
     time.sleep(0.3)
     root.update()
 

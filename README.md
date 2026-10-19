@@ -127,24 +127,57 @@ xvfb-run -a pytest
 
 ---
 
-## 🧅 Seed források és prioritásos fallback rendszer
+## 🧅 Seed Plugin / Adapter Architektúra és Fallback Rendszer
 
-A crawler nem véletlenszerűen tapogatózik: a beépített `SeedManager` egy intelligens, 8 lépcsős prioritási kaszkád szerint gyűjti össze az induló `.onion` címeket:
+A maggyűjtő rendszer moduláris **Plugin / Adapter architektúrára** épül, nagy hangsúlyt fektetve a bővíthetőségre és robusztusságra.
 
-| Prioritás | Forrás neve | Típus | Végpont jellege |
-|:---:|:---|:---|:---|
-| **1.** | **Tor66** | Friss rejtett könyvtár | `.onion` szolgáltatás + clearnet tükör |
-| **2.** | **Deep Search** | Katalógus & Kereső | `.onion` katalógus + clearnet tükör |
-| **3.** | **Haystak** | Nagy lefedettségű kereső | `.onion` végpont + clearnet tükör |
-| **4.** | **OnionLand** | Keresőmotoros index | `.onion` végpont + clearnet tükör |
-| **5.** | **Curated GitHub** | Kézileg ellenőrzött listák | Alec Muffett & Dan McInerney gyűjtemények |
-| **6.** | **OnionSearchEngine** | Metakereső aggregáció | Keresőmotoros API / web scraping |
-| **7.** | **Torch** | Veterán mélywebes index | `.onion` végpont + clearnet tükör |
-| **8.** | **not Evil** | *Utolsó mentsvár fallback* | `.onion` vészhelyzeti tartalék kereső |
-| **+** | **Ahmia.fi** | Globális indexelő | `.onion` + clearnet index |
+Minden seed forrás egy önálló, független plugin, amely a `BaseSeedPlugin` absztrakt bázisosztályból származik.
 
-### Fallback mechanizmus:
-Amennyiben egy forrás elérhetetlen, vagy kevesebb mint **10 érvényes címet** szolgáltat (`MIN_SEED_YIELD_THRESHOLD = 10`), a rendszer automatikusan és észrevétlenül léptet át a következő prioritási forrásra. A források egyenként is engedélyezhetők vagy tilthatók a beállításokban.
+| Prioritás | Plugin azonosító | Plugin neve | Típus | Végpont jellege |
+|:---:|:---|:---|:---|:---|
+| **10** | `tor66` | **Tor66** | Friss rejtett könyvtár | `.onion` szolgáltatás + clearnet tükör |
+| **20** | `deepsearch` | **Deep Search** | Katalógus & Kereső | `.onion` katalógus + clearnet tükör |
+| **30** | `haystak` | **Haystak** | Nagy lefedettségű kereső | `.onion` végpont + clearnet tükör |
+| **40** | `onionland` | **OnionLand** | Keresőmotoros index | `.onion` végpont + clearnet tükör |
+| **50** | `github` | **Curated GitHub** | Kézileg ellenőrzött listák | Alec Muffett & Dan McInerney gyűjtemények |
+| **60** | `ose` | **OnionSearchEngine** | Metakereső aggregáció | Keresőmotoros API / web scraping |
+| **70** | `torch` | **Torch** | Veterán mélywebes index | `.onion` végpont + clearnet tükör |
+| **80** | `notevil` | **not Evil** | *Utolsó mentsvár fallback* | `.onion` vészhelyzeti tartalék kereső |
+| **90** | `ahmia` | **Ahmia.fi** | Globális indexelő | `.onion` + clearnet index |
+| **100** | `custom_regex` | **Custom Regex** | Egyéni URL + Regex/CSS | Tetszőleges felhasználói forrás |
+
+### 🟢 Egészségügyi Ellenőrzés (Health-Check & Caching):
+- Minden plugin saját gyors, kis erőforrás-igényű `health_check()` metódussal rendelkezik (gyors HEAD/GET választeszt).
+- A health állapot automatikusan gyorsítótárazódik (`health_check_cache_ttl` pl. 10 percig), hogy elkerüljük a források túlterhelését.
+- A GUI-ban minden forrás mellett vizuális állapotjelző látható:
+  - 🟢 **Zöld**: Elérhető, egészséges forrás
+  - 🟡 **Sárga**: Még nem ellenőrzött / határeset
+  - 🔴 **Piros**: Elérhetetlen / hálózati hiba
+- Opció: *"Csak az egészséges (🟢 OK) forrásokat használd"* mód a garantáltan működő források használatához.
+
+### 🧩 Új Seed Forrás Írása (Fejlesztői Útmutató):
+Új seed forrás hozzáadása mindössze egy új fájl létrehozásával jár az `onion_search/seeds/plugins/` mappában! A `PluginRegistry` automatikusan felfedezi és betölti az új modult:
+
+```python
+# onion_search/seeds/plugins/my_custom_source.py
+from typing import Optional, Set
+from onion_search.seeds.base import BaseSeedPlugin, extract_onion_urls_from_text
+
+class MyCustomSeedPlugin(BaseSeedPlugin):
+    id = "my_source"
+    name = "Saját Kereső Plugin"
+    priority = 25  # Kaszkád sorrend prioritása (kisebb = előbb fut)
+    enabled = True
+
+    def _do_fetch_seeds(
+        self, query: Optional[str] = None, proxy_url: Optional[str] = None, allow_clearnet: bool = False, timeout: int = 15
+    ) -> Set[str]:
+        url = "http://mycustomoniondirectory.onion/list"
+        resp = self._make_request(url, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=timeout)
+        if resp and resp.status_code == 200:
+            return extract_onion_urls_from_text(resp.text)
+        return set()
+```
 
 ---
 

@@ -96,6 +96,8 @@ class SettingsDialog:
         self.auto_save_var = tk.BooleanVar(value=bool(getattr(cfg, "auto_save", True)))
         self.dark_mode_var = tk.BooleanVar(value=bool(getattr(cfg, "dark_mode", True)))
         self.minimize_to_tray_var = tk.BooleanVar(value=bool(getattr(cfg, "minimize_to_tray", False)))
+        self.health_check_cache_ttl_var = tk.DoubleVar(value=float(getattr(cfg, "health_check_cache_ttl", 600.0)))
+        self.use_only_healthy_sources_var = tk.BooleanVar(value=bool(getattr(cfg, "use_only_healthy_sources", False)))
 
     def setup_ui(self) -> None:
         # Header title banner
@@ -360,6 +362,17 @@ class SettingsDialog:
         ttk.Checkbutton(g_frame, text="Sötét téma (Dark Mode) használata", variable=self.dark_mode_var).pack(anchor=tk.W, pady=6)
         ttk.Checkbutton(g_frame, text="Minimalizálás tálcára bezárás helyett", variable=self.minimize_to_tray_var).pack(anchor=tk.W, pady=6)
 
+        s_frame = ttk.LabelFrame(f, text="Seed Plugin Beállítások", padding=10)
+        s_frame.pack(fill=tk.X, pady=4)
+
+        ttk.Checkbutton(s_frame, text="Csak az egészséges (🟢 OK) seed forrásokat használd", variable=self.use_only_healthy_sources_var).pack(anchor=tk.W, pady=4)
+
+        ttl_row = ttk.Frame(s_frame)
+        ttl_row.pack(fill=tk.X, pady=4)
+        ttk.Label(ttl_row, text="Health-Check gyorsítótár TTL (mp):").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Spinbox(ttl_row, from_=60, to=3600, increment=60, textvariable=self.health_check_cache_ttl_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(ttl_row, text="(pl. 600 mp = 10 perc)", font=("TkDefaultFont", 7), foreground="#7f8c8d").pack(side=tk.LEFT, padx=6)
+
     def run_diagnostics(self) -> None:
         if self.on_run_diagnostics_callback:
             self.on_run_diagnostics_callback()
@@ -419,6 +432,9 @@ class SettingsDialog:
             seed_sources=self.cfg.seed_sources,
             seed_update_interval_hours=self.cfg.seed_update_interval_hours,
             last_seed_update=self.cfg.last_seed_update,
+            health_check_cache_ttl=self.health_check_cache_ttl_var.get(),
+            disabled_plugins=self.cfg.disabled_plugins,
+            use_only_healthy_sources=self.use_only_healthy_sources_var.get(),
             timeout_get=self.timeout_get_var.get(),
             domain_delay=self.domain_delay_var.get(),
             queries=self.cfg.queries,

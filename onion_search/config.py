@@ -77,6 +77,7 @@ DEFAULT_AUTO_CLEANUP_DEAD: bool = False
 DEFAULT_EXPORT_FORMAT: str = "csv"
 DEFAULT_AUTO_TOR_DIAGNOSTICS: bool = True
 DEFAULT_MINIMIZE_TO_TRAY: bool = False
+DEFAULT_HEALTH_CHECK_CACHE_TTL: float = 600.0
 
 
 @dataclass
@@ -98,9 +99,12 @@ class AppConfig:
     allow_clearnet: bool = False
     encrypt_storage: bool = False
     auto_update_seeds: bool = True
-    seed_sources: str = "tor66,deepsearch,haystak,onionland,github,ose,torch,notevil"
+    seed_sources: str = "tor66,deepsearch,haystak,onionland,github,ose,torch,notevil,ahmia"
     seed_update_interval_hours: float = 12.0
     last_seed_update: float = 0.0
+    health_check_cache_ttl: float = DEFAULT_HEALTH_CHECK_CACHE_TTL
+    disabled_plugins: str = ""
+    use_only_healthy_sources: bool = False
     timeout_get: int = DEFAULT_TIMEOUT_GET
     domain_delay: float = DEFAULT_DOMAIN_DELAY
     queries: str = "forum, board, wiki, library"

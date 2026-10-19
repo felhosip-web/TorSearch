@@ -97,3 +97,47 @@ def test_main_window_dark_mode_and_resume(tmp_path):
     assert str(app.btn_resume.cget("state")) == "normal"
 
     root.destroy()
+
+
+def test_main_window_tor_diagnostics(tmp_path):
+    root = tk.Tk()
+    root.withdraw()
+
+    from onion_search.storage.sqlite_backend import SQLiteBackend
+    from onion_search.storage.json_backend import JSONBackend
+    import time
+
+    test_db = tmp_path / "test.db"
+    test_json = tmp_path / "test.json"
+    test_dead = tmp_path / "dead.json"
+
+    sqlite_backend = SQLiteBackend(db_file=test_db)
+    json_backend = JSONBackend(state_file=test_json, dead_file=test_dead)
+
+    mock_tor_controller = MagicMock()
+    mock_tor_controller.run_diagnostics.return_value = {
+        "success": True,
+        "selected_socks_port": "9050",
+        "selected_ctrl_port": "9051",
+        "short_msg": "[✓] Tor OK 9050",
+        "formatted_report": "OK Report",
+        "ports": {},
+        "control_ports": {"9051": {"ok": True, "msg": "OK"}},
+        "active_res": {"latency_ms": 120.0, "ip": "1.2.3.4"},
+    }
+
+    app = MainWindow(
+        root,
+        sqlite_backend=sqlite_backend,
+        json_backend=json_backend,
+        tor_controller=mock_tor_controller,
+    )
+
+    app.run_tor_diagnostics_thread(show_dialog_on_success=False)
+    time.sleep(0.3)
+    root.update()
+
+    assert app.port_var.get() == "9050"
+    assert app.ctrl_port_var.get() == "9051"
+
+    root.destroy()

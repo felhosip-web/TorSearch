@@ -16,7 +16,7 @@ Main application window coordinating UI components, search lifecycle, persistenc
 Integrates standard logging, ConfigManager persistence, and constants configuration.
 Developed by HES Projects by FePe.
 """
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import json
@@ -56,6 +56,51 @@ from onion_search.storage.sqlite_backend import SQLiteBackend
 from onion_search.ui.filters import FilterPanel
 from onion_search.ui.log_panel import LogPanel, logger
 from onion_search.utils.helpers import fmt_ts, parse_list, normalize_onion_url
+
+
+class PerformanceMetrics:
+    """Tracks live response latencies and request rates over a rolling 15s window."""
+
+    def __init__(self, window_seconds: float = 15.0):
+        self.window_seconds = window_seconds
+        self.history = deque()  # stores (timestamp, latency_ms, status)
+        self.lock = threading.Lock()
+
+    def record_request(self, latency_ms: float, status: str) -> None:
+        now = time.time()
+        with self.lock:
+            self.history.append((now, latency_ms, status))
+            self._prune(now)
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.window_seconds
+        while self.history and self.history[0][0] < cutoff:
+            self.history.popleft()
+
+    def get_stats(self) -> Dict[str, Any]:
+        now = time.time()
+        with self.lock:
+            self._prune(now)
+            count = len(self.history)
+            if count == 0:
+                return {
+                    "req_per_sec": 0.0,
+                    "avg_latency_ms": 0.0,
+                    "count_in_window": 0,
+                }
+
+            total_latency = sum(item[1] for item in self.history)
+            avg_latency = total_latency / count
+            req_per_sec = count / self.window_seconds
+            return {
+                "req_per_sec": round(req_per_sec, 2),
+                "avg_latency_ms": round(avg_latency, 1),
+                "count_in_window": count,
+            }
+
+    def clear(self) -> None:
+        with self.lock:
+            self.history.clear()
 
 
 class MainWindow:
@@ -100,6 +145,7 @@ class MainWindow:
         self.running: bool = False
         self.lock: threading.Lock = threading.Lock()
         self.stats: Dict[str, int] = {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0}
+        self.perf_metrics = PerformanceMetrics(window_seconds=15.0)
 
         self.success_count: int = 0
         self.total_count: int = 0
@@ -457,6 +503,7 @@ class MainWindow:
         )
         tools_menu.add_command(label="🌱 Maglista Frissítése", command=lambda: self.update_seeds_thread())
         tools_menu.add_command(label="🔄 NEWNYM kérése (Ctrl+N)", command=self.manual_newnym_thread)
+        tools_menu.add_command(label="⚡ Teljesítmény Teszt (Sync vs Async)...", command=self.open_benchmark_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🚨 Pánik törlés", command=self.panic_wipe)
         menubar.add_cascade(label="Eszközök", menu=tools_menu)
@@ -490,6 +537,12 @@ class MainWindow:
         menubar.add_cascade(label="Súgó", menu=help_menu)
 
         self.root.config(menu=menubar)
+
+    def open_benchmark_dialog(self) -> None:
+        """Open comparative Sync vs Async performance benchmark dialog."""
+        from onion_search.ui.benchmark_dialog import PerformanceTestDialog
+        proxy_url = f"socks5h://127.0.0.1:{self.port_var.get()}"
+        PerformanceTestDialog(parent=self.root, fetcher=self.fetcher, proxy_url=proxy_url)
 
     def open_settings_dialog(self) -> None:
         """Open comprehensive tabbed settings dialog."""
@@ -900,7 +953,7 @@ class MainWindow:
         self.lbl_speed = ttk.Label(prog_frame, text="", font=("TkDefaultFont", 7))
         self.lbl_speed.pack(side=tk.LEFT)
 
-        # Status bar
+        # Status bar & Live Performance Monitor panel
         self.status_bar = tk.Frame(left, bg="#2c3e50", height=22)
         self.status_bar.pack(fill=tk.X, pady=2)
         self.lbl_statusbar = tk.Label(
@@ -911,7 +964,17 @@ class MainWindow:
             font=("TkDefaultFont", 8),
             anchor=tk.W,
         )
-        self.lbl_statusbar.pack(fill=tk.X, padx=6, pady=2)
+        self.lbl_statusbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=2)
+
+        self.lbl_perf_monitor = tk.Label(
+            self.status_bar,
+            text="⚡ Monitor: Készen",
+            bg="#2c3e50",
+            fg="#f1c40f",
+            font=("TkDefaultFont", 8, "bold"),
+            anchor=tk.E,
+        )
+        self.lbl_perf_monitor.pack(side=tk.RIGHT, padx=6, pady=2)
 
         # Log component
         self.log_panel = LogPanel(left)
@@ -2511,6 +2574,39 @@ class MainWindow:
             except Exception:
                 pass
 
+    def start_perf_monitor(self) -> None:
+        self.perf_metrics.clear()
+        self._update_perf_monitor()
+
+    def _update_perf_monitor(self) -> None:
+        if not self.running:
+            return
+
+        async_mode = getattr(self.config_manager.config, "async_mode", False) or self.async_mode_var.get()
+        mode_str = "Async" if async_mode else "Sync"
+        active_cnt = len(self.in_progress_urls)
+        max_workers = self.worker_var.get()
+        stats = self.perf_metrics.get_stats()
+
+        req_sec = stats["req_per_sec"]
+        avg_lat = stats["avg_latency_ms"]
+
+        alive = self.stats.get("alive", 0)
+        dead = self.stats.get("dead", 0)
+
+        perf_msg = (
+            f"⚡ [Mód: {mode_str}] Workers: {active_cnt}/{max_workers} | "
+            f"{req_sec} req/s | Átl. latency: {avg_lat:.0f} ms | Élő: {alive} | Halott: {dead}"
+        )
+
+        try:
+            self.lbl_perf_monitor.config(text=perf_msg)
+        except Exception:
+            pass
+
+        if self.running:
+            self.root.after(500, self._update_perf_monitor)
+
     def fetch_one(self, url: str, proxy_url: str, async_mode: bool = False) -> Dict[str, Any]:
         now_ts = time.time()
         norm_input_url = normalize_onion_url(url) or url
@@ -2529,6 +2625,8 @@ class MainWindow:
         page = self.fetcher.fetch_url(
             url, proxy_url, is_running_cb=lambda: self.running, async_mode=async_mode
         )
+        latency_ms = (time.time() - now_ts) * 1000.0
+        self.perf_metrics.record_request(latency_ms, page.get("status", "unknown"))
         raw_url_to_save: str = page.get("url", url)
         norm_save_url: str = normalize_onion_url(raw_url_to_save) or raw_url_to_save
 
@@ -2697,6 +2795,8 @@ class MainWindow:
         page = await self.fetcher.async_fetch_page_httpx(
             client, url, is_running_cb=lambda: self.running
         )
+        latency_ms = (time.time() - now_ts) * 1000.0
+        self.perf_metrics.record_request(latency_ms, page.get("status", "unknown"))
         raw_url_to_save: str = page.get("url", url)
         norm_save_url: str = normalize_onion_url(raw_url_to_save) or raw_url_to_save
 
@@ -2999,6 +3099,7 @@ class MainWindow:
         def _setup_ui():
             self.progress.config(maximum=total if total else 1, value=0)
             self.lbl_total.config(text=f"{all_onions_count}")
+            self.start_perf_monitor()
         self.root.after(0, _setup_ui)
 
         completed = 0

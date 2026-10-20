@@ -129,6 +129,7 @@ class MainWindow:
         self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
         self.tor_tcp_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_tcp_timeout", 2.0))
         self.tor_socks_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_socks_timeout", 4.0))
+        self.async_mode_var = tk.BooleanVar(value=getattr(cfg, "async_mode", False))
         self.status_var = tk.StringVar(value="Készen - v5.0.0")
 
         # Build UI layout
@@ -409,6 +410,7 @@ class MainWindow:
                 normalize_to_host_only=self.host_only_var.get(),
                 tor_tcp_timeout=self.tor_tcp_timeout_var.get(),
                 tor_socks_timeout=self.tor_socks_timeout_var.get(),
+                async_mode=self.async_mode_var.get(),
             )
             self.config_manager.save(cfg)
         except Exception:
@@ -510,6 +512,7 @@ class MainWindow:
             self.host_only_var.set(new_cfg.normalize_to_host_only)
             self.tor_tcp_timeout_var.set(new_cfg.tor_tcp_timeout)
             self.tor_socks_timeout_var.set(new_cfg.tor_socks_timeout)
+            self.async_mode_var.set(new_cfg.async_mode)
             self.apply_theme()
 
         SettingsDialog(
@@ -2508,7 +2511,7 @@ class MainWindow:
             except Exception:
                 pass
 
-    def fetch_one(self, url: str, proxy_url: str) -> Dict[str, Any]:
+    def fetch_one(self, url: str, proxy_url: str, async_mode: bool = False) -> Dict[str, Any]:
         now_ts = time.time()
         norm_input_url = normalize_onion_url(url) or url
 
@@ -2523,8 +2526,8 @@ class MainWindow:
                 }
             self.in_progress_urls.add(norm_input_url)
 
-        page = self.fetcher.fetch_page(
-            url, proxy_url, is_running_cb=lambda: self.running
+        page = self.fetcher.fetch_url(
+            url, proxy_url, is_running_cb=lambda: self.running, async_mode=async_mode
         )
         raw_url_to_save: str = page.get("url", url)
         norm_save_url: str = normalize_onion_url(raw_url_to_save) or raw_url_to_save
@@ -2587,6 +2590,173 @@ class MainWindow:
                 }
 
         # Deduplication check 1: O(1) set lookup in self.result_urls
+        with self.lock:
+            url_already_in_results = norm_save_url in self.result_urls
+
+        if url_already_in_results:
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return {
+                "url": norm_save_url,
+                "status": "clone",
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+
+        is_fp_duplicate, fp_orig = self.is_fp_seen(fp)
+        if is_fp_duplicate:
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return {
+                "url": norm_save_url,
+                "status": "clone",
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+
+        for b in btc:
+            is_btc_duplicate, _ = self.is_btc_seen(b)
+            if is_btc_duplicate:
+                with self.lock:
+                    self.in_progress_urls.discard(norm_input_url)
+                    if norm_save_url not in self.checked_urls:
+                        self.checked_urls.add(norm_save_url)
+                        if norm_save_url not in self.pending_checked:
+                            self.pending_checked.append(norm_save_url)
+                return {
+                    "url": norm_save_url,
+                    "status": "clone_btc",
+                    "ts": now_ts,
+                    "lang": lang,
+                    "category": category,
+                }
+
+        with self.lock:
+            self.in_progress_urls.discard(norm_input_url)
+            self._cache_fp(fp, norm_save_url)
+            self.pending_fp[fp] = norm_save_url
+            for b in btc:
+                self._cache_btc(b, norm_save_url)
+                self.pending_btc[b] = norm_save_url
+
+            result = {
+                "title": title,
+                "url": norm_save_url,
+                "snippet": snippet,
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+            self.results.append(result)
+            self.result_urls.add(norm_save_url)
+            self.pending_results.append(result)
+            if norm_save_url not in self.checked_urls:
+                self.checked_urls.add(norm_save_url)
+            if norm_save_url not in self.pending_checked:
+                self.pending_checked.append(norm_save_url)
+
+        return {
+            "url": norm_save_url,
+            "status": "unique",
+            "title": title,
+            "snippet": snippet,
+            "fp": fp,
+            "ts": now_ts,
+            "lang": lang,
+            "category": category,
+        }
+
+    async def async_fetch_one(self, client: Any, url: str, proxy_url: str) -> Dict[str, Any]:
+        now_ts = time.time()
+        norm_input_url = normalize_onion_url(url) or url
+
+        with self.lock:
+            if norm_input_url in self.dead_blacklist or url in self.dead_blacklist:
+                return {
+                    "url": norm_input_url,
+                    "status": "dead_blacklisted",
+                    "ts": now_ts,
+                    "lang": "en",
+                    "category": "other",
+                }
+            self.in_progress_urls.add(norm_input_url)
+
+        page = await self.fetcher.async_fetch_page_httpx(
+            client, url, is_running_cb=lambda: self.running
+        )
+        raw_url_to_save: str = page.get("url", url)
+        norm_save_url: str = normalize_onion_url(raw_url_to_save) or raw_url_to_save
+
+        if page.get("status") == "canceled" or not self.running:
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+            return {"url": norm_save_url, "status": "canceled", "ts": now_ts}
+
+        if page.get("status") == "dead":
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                self.dead_blacklist[norm_save_url] = now_ts
+                self.pending_dead[norm_save_url] = now_ts
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return page
+
+        if page.get("status") == "empty":
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return page
+
+        fp: str = page.get("fp", "")
+        btc: List[str] = page.get("btc", [])
+        lang: str = page.get("lang", "en")
+        category: str = page.get("category", "other")
+        title: str = page.get("title", "")
+        text: str = page.get("text", "")
+        snippet: str = page.get("snippet", "")
+
+        if (
+            self.filters_panel.enable_precise_var.get()
+            and self.filters_panel.save_only_filtered_var.get()
+        ):
+            ok, reason = self.filters_panel.matches_precise(
+                title, text, lang, category
+            )
+            if not ok:
+                with self.lock:
+                    self.in_progress_urls.discard(norm_input_url)
+                    if norm_save_url not in self.checked_urls:
+                        self.checked_urls.add(norm_save_url)
+                        if norm_save_url not in self.pending_checked:
+                            self.pending_checked.append(norm_save_url)
+                    self.stats["filtered"] = self.stats.get("filtered", 0) + 1
+                return {
+                    "url": norm_save_url,
+                    "status": "filtered",
+                    "reason": reason,
+                    "ts": now_ts,
+                    "lang": lang,
+                    "category": category,
+                }
+
         with self.lock:
             url_already_in_results = norm_save_url in self.result_urls
 
@@ -2812,8 +2982,10 @@ class MainWindow:
                 if u not in norm_checked and u not in norm_dead
             ]
             all_onions_count = len(all_onions)
+            async_mode = getattr(self.config_manager.config, "async_mode", False) or self.async_mode_var.get()
+            mode_label = "Async [httpx]" if async_mode else "Sync [requests]"
             self.log_msg(
-                f"[START {backend}] {len(all_onions)} összes, "
+                f"[START {backend}] Mód: {mode_label} | {len(all_onions)} összes, "
                 f"{len(self.checked_urls)} ellenőrizve, {len(new_urls)} új, {workers} worker",
                 force=True,
                 tag="start",
@@ -2905,49 +3077,113 @@ class MainWindow:
             if comp % 25 == 0 and auto_save:
                 self.save_incremental_pending()
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(self.fetch_one, url, proxy): url
-                for url in new_urls
-            }
-            for fut in as_completed(futures):
-                url_finished = futures.get(fut)
-                if not self.running:
-                    for f in futures:
-                        f.cancel()
-                    break
+        async_mode = getattr(self.config_manager.config, "async_mode", False) or self.async_mode_var.get()
+        use_fallback_sync = False
 
-                res = fut.result()
-                if res.get("status") == "canceled":
-                    continue
+        if async_mode:
+            try:
+                import httpx
+                proxy_clean = proxy
+                if proxy_clean and proxy_clean.startswith("socks5h://"):
+                    proxy_clean = proxy_clean.replace("socks5h://", "socks5://")
 
-                completed += 1
-                with self.lock:
-                    if url_finished in self.pending_queue:
-                        self.pending_queue.remove(url_finished)
-                    ui_batch_items.append(res)
+                async def _async_search():
+                    nonlocal completed
+                    sem = asyncio.Semaphore(workers)
+                    transport_kwargs = {}
+                    if proxy_clean:
+                        transport_kwargs["proxy"] = proxy_clean
 
-                is_success = res["status"] in ("unique", "clone", "clone_btc")
-                with self.lock:
-                    if res["status"] == "unique":
-                        self.stats["alive"] = self.stats.get("alive", 0) + 1
-                    elif res["status"] in ("dead", "dead_blacklisted", "empty"):
-                        self.stats["dead"] = self.stats.get("dead", 0) + 1
-                    elif "clone" in res["status"]:
-                        self.stats["clone"] = self.stats.get("clone", 0) + 1
-                        self.stats["alive"] = self.stats.get("alive", 0) + 1
-                    elif res["status"] == "filtered":
-                        self.stats["filtered"] = (
-                            self.stats.get("filtered", 0) + 1
-                        )
+                    async with httpx.AsyncClient(timeout=TIMEOUT_GET, follow_redirects=True, **transport_kwargs) as client:
+                        async def _task(u):
+                            nonlocal completed
+                            if not self.running:
+                                return
+                            async with sem:
+                                res = await self.async_fetch_one(client, u, proxy)
+                                if res.get("status") == "canceled":
+                                    return
 
-                self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
+                                completed += 1
+                                with self.lock:
+                                    if u in self.pending_queue:
+                                        self.pending_queue.remove(u)
+                                    ui_batch_items.append(res)
 
-                now_t = time.time()
-                if completed % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or completed == total:
-                    self._last_ui_update_ts = now_t
-                    c_snap = completed
-                    self.root.after(0, lambda c=c_snap: _flush_ui(c))
+                                is_success = res["status"] in ("unique", "clone", "clone_btc")
+                                with self.lock:
+                                    if res["status"] == "unique":
+                                        self.stats["alive"] = self.stats.get("alive", 0) + 1
+                                    elif res["status"] in ("dead", "dead_blacklisted", "empty"):
+                                        self.stats["dead"] = self.stats.get("dead", 0) + 1
+                                    elif "clone" in res["status"]:
+                                        self.stats["clone"] = self.stats.get("clone", 0) + 1
+                                        self.stats["alive"] = self.stats.get("alive", 0) + 1
+                                    elif res["status"] == "filtered":
+                                        self.stats["filtered"] = self.stats.get("filtered", 0) + 1
+
+                                self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
+
+                                now_t = time.time()
+                                if completed % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or completed == total:
+                                    self._last_ui_update_ts = now_t
+                                    c_snap = completed
+                                    self.root.after(0, lambda c=c_snap: _flush_ui(c))
+
+                        tasks = [_task(u) for u in new_urls]
+                        await asyncio.gather(*tasks, return_exceptions=True)
+
+                import asyncio
+                asyncio.run(_async_search())
+            except Exception as e:
+                self.log_msg(f"[ASYNC MODE HIBA] {e}. Visszaállás szinkron módra...", force=True, tag="error")
+                self.set_statusbar_color("#e67e22", msg="[!] Async hiba, visszaállás szinkron módra...")
+                use_fallback_sync = True
+
+        if not async_mode or use_fallback_sync:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(self.fetch_one, url, proxy, async_mode=False): url
+                    for url in new_urls
+                }
+                for fut in as_completed(futures):
+                    url_finished = futures.get(fut)
+                    if not self.running:
+                        for f in futures:
+                            f.cancel()
+                        break
+
+                    res = fut.result()
+                    if res.get("status") == "canceled":
+                        continue
+
+                    completed += 1
+                    with self.lock:
+                        if url_finished in self.pending_queue:
+                            self.pending_queue.remove(url_finished)
+                        ui_batch_items.append(res)
+
+                    is_success = res["status"] in ("unique", "clone", "clone_btc")
+                    with self.lock:
+                        if res["status"] == "unique":
+                            self.stats["alive"] = self.stats.get("alive", 0) + 1
+                        elif res["status"] in ("dead", "dead_blacklisted", "empty"):
+                            self.stats["dead"] = self.stats.get("dead", 0) + 1
+                        elif "clone" in res["status"]:
+                            self.stats["clone"] = self.stats.get("clone", 0) + 1
+                            self.stats["alive"] = self.stats.get("alive", 0) + 1
+                        elif res["status"] == "filtered":
+                            self.stats["filtered"] = (
+                                self.stats.get("filtered", 0) + 1
+                            )
+
+                    self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
+
+                    now_t = time.time()
+                    if completed % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or completed == total:
+                        self._last_ui_update_ts = now_t
+                        c_snap = completed
+                        self.root.after(0, lambda c=c_snap: _flush_ui(c))
 
         with self.lock:
             self.in_progress_urls.clear()

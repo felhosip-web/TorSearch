@@ -41,6 +41,12 @@ from onion_search.core.detector import (
 from onion_search.core.seeds import SeedManager
 from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET, normalize_onion_url
 
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+
 # Fast lxml parser detection with graceful fallback
 try:
     import lxml
@@ -504,6 +510,150 @@ class OnionFetcher:
 
         url_to_save = final_url if ".onion" in final_url else url
         return self.parse_html_content(html, url_to_save, url, now_ts)
+
+    async def async_fetch_page_httpx(self, client, url, is_running_cb=None):
+        """
+        Asynchronous fetch using httpx.AsyncClient with SOCKS5h Tor proxy support,
+        retry logic, rate limiting, and lxml HTML parsing.
+        """
+        now_ts = time.time()
+        domain = urlparse(url).netloc
+
+        if not self.robots_checker.is_allowed(url, None):
+            return {
+                "url": url,
+                "status": "filtered",
+                "reason": "robots.txt disallowed",
+                "ts": now_ts,
+                "lang": "en",
+                "category": "other",
+            }
+
+        last_error = None
+        last_code = None
+        final_url = url
+        html = None
+
+        for attempt in range(self.max_retries + 1):
+            if is_running_cb and not is_running_cb():
+                return {
+                    "url": url,
+                    "status": "canceled",
+                    "ts": now_ts,
+                    "lang": "en",
+                    "category": "other",
+                }
+
+            await self.rate_limiter.async_wait_for_domain(domain)
+
+            headers = random.choice(HEADERS_LIST)
+            try:
+                res = client.get(url, headers=headers)
+                if asyncio.iscoroutine(res):
+                    r = await res
+                elif hasattr(res, "__aenter__"):
+                    async with res as r_cm:
+                        r = r_cm
+                else:
+                    r = res
+
+                final_url = str(getattr(r, "url", url))
+                last_code = getattr(r, "status_code", 200)
+                text = getattr(r, "text", "")
+                if asyncio.iscoroutine(text):
+                    text = await text
+
+                if last_code in (429, 503) and attempt < self.max_retries:
+                    backoff = (2**attempt) * 1.5
+                    await asyncio.sleep(backoff)
+                    continue
+
+                if last_code != 200 or len(text) < 300:
+                    if last_code in (500, 502, 504) and attempt < self.max_retries:
+                        backoff = 2**attempt
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    return {
+                        "url": final_url if ".onion" in final_url else url,
+                        "status": "dead",
+                        "code": last_code,
+                        "ts": now_ts,
+                        "lang": "en",
+                        "category": "other",
+                    }
+
+                html = text
+                break
+
+            except Exception as e:
+                last_error = str(e)[:100]
+                if attempt < self.max_retries:
+                    backoff = 2**attempt
+                    await asyncio.sleep(backoff)
+                    continue
+                else:
+                    return {
+                        "url": url,
+                        "status": "dead",
+                        "err": last_error,
+                        "ts": now_ts,
+                        "lang": "en",
+                        "category": "other",
+                    }
+
+        if html is None:
+            return {
+                "url": url,
+                "status": "dead",
+                "err": last_error or f"HTTP {last_code}",
+                "ts": now_ts,
+                "lang": "en",
+                "category": "other",
+            }
+
+        url_to_save = final_url if ".onion" in final_url else url
+        return self.parse_html_content(html, url_to_save, url, now_ts)
+
+    def fetch_url(
+        self,
+        url: str,
+        proxy_url: str,
+        is_running_cb: Optional[Callable[[], bool]] = None,
+        async_mode: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Dual-mode fetch entry point.
+        Uses synchronous requests if async_mode is False.
+        Uses httpx/asyncio if async_mode is True, falling back to sync on missing dependencies or error.
+        """
+        if not async_mode:
+            return self.fetch_page(url, proxy_url, is_running_cb=is_running_cb)
+
+        if not HTTPX_AVAILABLE:
+            logging.getLogger("onion_search").warning(
+                "[ASYNC MODE] 'httpx' csomag nem elérhető. Visszaállás szinkron módra."
+            )
+            return self.fetch_page(url, proxy_url, is_running_cb=is_running_cb)
+
+        try:
+            proxy_clean = proxy_url
+            if proxy_clean and proxy_clean.startswith("socks5h://"):
+                proxy_clean = proxy_clean.replace("socks5h://", "socks5://")
+
+            async def _run_async():
+                transport_kwargs = {}
+                if proxy_clean:
+                    transport_kwargs["proxy"] = proxy_clean
+                async with httpx.AsyncClient(timeout=TIMEOUT_GET, follow_redirects=True, **transport_kwargs) as client:
+                    return await self.async_fetch_page_httpx(client, url, is_running_cb=is_running_cb)
+
+            return asyncio.run(_run_async())
+        except Exception as e:
+            logging.getLogger("onion_search").warning(
+                f"[ASYNC MODE HIBA] {e}. Visszaállás szinkron módra."
+            )
+            return self.fetch_page(url, proxy_url, is_running_cb=is_running_cb)
 
     async def async_fetch_page(self, client, url, is_running_cb=None):
         """

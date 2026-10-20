@@ -30,6 +30,7 @@ Az **Onion Kereső** egy professzionális, asztali és webes felülettel is rend
 - **Szigorú Tor-only védelem**: Valamennyi külső hálózati kérés kizárólag a helyi Tor SOCKS5h proxyn (`socks5h://127.0.0.1:9050`) halad keresztül. Ha a clearnet mód le van tiltva, véletlenül sem szivároghat ki adat a nyílt internetre.
 - **Intelligens 8-szintű Seed Kaszkád**: Automatikus kezdőcím (seed) gyűjtés több független forrásból (Tor66, Deep Search, Haystak, OnionLand stb.), automatikus továbblépéssel alacsony találatszám esetén.
 - **Titkosított SQLite tárolás (Fernet + HMAC)**: A felderített oldalak, státuszkódok és halott címek determinisztikus HMAC-cal indexelt, Fernet szimmetrikus titkosítással ellátott SQLite adatbázisban tárolódnak.
+- **Dual-Mode Hálózati Fetcher (Szinkron / Aszinkron)**: A meglévő szinkron (`requests` + szálak) működés az alapértelmezett. A Beállításokban opcióként bekapcsolható az aszinkron (`httpx` + `asyncio`) mód a magasabb párhuzamosságért és hatékonyságért.
 - **Pánik törlés (Panic Shredder)**: Vészhelyzet esetén egyetlen billentyűkombinációval (`Ctrl+Shift+Delete`) az összes konfiguráció, indexelt adatbázis és magfájl biztonságosan felülíródik és megsemmisül.
 - **Élő szűrés és tartalomkategorizálás**: Valós idejű gépelés közbeni szűrés kötelező és tiltott kulcsszavakra (*Must / Must Not Contain*), kategóriák (Market, Forum, Wiki, Library) és nyelvek szerint.
 - **Halott linkek kiszűrése (Dead Blacklist)**: A nem elérhető vagy megszűnt szolgáltatások automatikusan feketelistára kerülnek az erőforrások kímélése érdekében.
@@ -110,8 +111,12 @@ python3 -m onion_search.main
 ### Gyorsbillentyűk és kezelőszervek:
 - **🌱 Magok (Tor66, DeepSearch...)**: Azonnali többforrásos seed frissítés indítása a háttérben.
 - **⚙️ (Jobb klikk a Magok gombra)**: Maglista Kezelő dialógus megnyitása (források ki-/bekapcsolása, frissítési időköz állítása, cache statisztika).
+- **⚙️ Beállítások (`Ctrl+,`)**: Hálózat, Crawler (Szinkron / Aszinkron kísérleti mód), Titkosítás és Szűrők beállítása.
 - **ℹ️ Licenc / Névjegy**: Licencinformációk és szerzői attribúció megtekintése.
 - **🚨 Pánik törlés (`Ctrl+Shift+Delete`)**: Azonnali helyi adatbázis- és állapotmegsemmisítés.
+
+> **Megjegyzés az Aszinkron Módhoz (kísérleti):**
+> A Beállítások -> *Crawler / Teljesítmény* fülön bekapcsolható az „Aszinkron hálózati mód (kísérleti)” (`async_mode: true`). Ez az `httpx` és `asyncio` könyvtárakat használja a hálózati kérések magasabb szintű párhuzamosításához. Amennyiben az aszinkron környezetben hiba lépne fel vagy hiányozna egy függőség, a rendszer automatikusan visszaesik a stabil szinkron módra.
 
 ### Tesztek futtatása
 

@@ -23,7 +23,7 @@ from typing import Any, Dict
 
 # Application Metadata
 APP_NAME = "Onion Kereső"
-APP_VERSION = "4.9.4"
+APP_VERSION = "5.0.0"
 APP_AUTHOR = "HES Projects by FePe"
 APP_LICENSE = "Apache-2.0"
 APP_COPYRIGHT = "Copyright 2026 HES Projects by FePe"
@@ -77,6 +77,7 @@ DEFAULT_AUTO_CLEANUP_DEAD: bool = False
 DEFAULT_EXPORT_FORMAT: str = "csv"
 DEFAULT_AUTO_TOR_DIAGNOSTICS: bool = True
 DEFAULT_MINIMIZE_TO_TRAY: bool = False
+DEFAULT_HEALTH_CHECK_CACHE_TTL: float = 600.0
 
 
 @dataclass
@@ -88,6 +89,7 @@ class AppConfig:
     ctrl_port: str = DEFAULT_CTRL_PORT
     workers: int = DEFAULT_WORKERS
     backend: str = DEFAULT_BACKEND
+    storage_backend: str = DEFAULT_BACKEND
     dark_mode: bool = True
     auto_newnym_success: bool = True
     auto_newnym_total: bool = True
@@ -98,9 +100,12 @@ class AppConfig:
     allow_clearnet: bool = False
     encrypt_storage: bool = False
     auto_update_seeds: bool = True
-    seed_sources: str = "tor66,deepsearch,haystak,onionland,github,ose,torch,notevil"
+    seed_sources: str = "tor66,deepsearch,haystak,onionland,github,ose,torch,notevil,ahmia"
     seed_update_interval_hours: float = 12.0
     last_seed_update: float = 0.0
+    health_check_cache_ttl: float = DEFAULT_HEALTH_CHECK_CACHE_TTL
+    disabled_plugins: str = ""
+    use_only_healthy_sources: bool = False
     timeout_get: int = DEFAULT_TIMEOUT_GET
     domain_delay: float = DEFAULT_DOMAIN_DELAY
     queries: str = "forum, board, wiki, library"

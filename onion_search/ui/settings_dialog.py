@@ -96,6 +96,8 @@ class SettingsDialog:
         self.auto_save_var = tk.BooleanVar(value=bool(getattr(cfg, "auto_save", True)))
         self.dark_mode_var = tk.BooleanVar(value=bool(getattr(cfg, "dark_mode", True)))
         self.minimize_to_tray_var = tk.BooleanVar(value=bool(getattr(cfg, "minimize_to_tray", False)))
+        self.health_check_cache_ttl_var = tk.DoubleVar(value=float(getattr(cfg, "health_check_cache_ttl", 600.0)))
+        self.use_only_healthy_sources_var = tk.BooleanVar(value=bool(getattr(cfg, "use_only_healthy_sources", False)))
 
     def setup_ui(self) -> None:
         # Header title banner
@@ -316,22 +318,37 @@ class SettingsDialog:
     def setup_tab_storage(self) -> None:
         f = self.tab_storage
 
-        b_frame = ttk.LabelFrame(f, text="Adatbázis Motor & Biztonság", padding=10)
+        b_frame = ttk.LabelFrame(f, text="Adatbázis Motor & Cserélhető Tároló (Storage Backend)", padding=10)
         b_frame.pack(fill=tk.X, pady=4)
 
         ttk.Label(b_frame, text="Tároló Engine:").grid(row=0, column=0, sticky=tk.W, pady=6)
         b_combo = ttk.Combobox(
             b_frame,
             textvariable=self.backend_var,
-            values=["sqlite", "json"],
+            values=["sqlite", "json", "postgres"],
             state="readonly",
-            width=10,
+            width=12,
         )
         b_combo.grid(row=0, column=1, sticky=tk.W, pady=6, padx=6)
 
         ttk.Label(b_frame, text=f"Adatbázis fájl: {DB_FILE}", font=("TkDefaultFont", 8), foreground="#7f8c8d").grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=2)
 
         ttk.Checkbutton(b_frame, text="Adatbázis mentések AES/Fernet titkosítása", variable=self.encrypt_storage_var).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=6)
+
+        # Storage Diagnostics Card
+        st_frame = ttk.LabelFrame(f, text="Tároló Diagnosztika & Statisztika", padding=10)
+        st_frame.pack(fill=tk.X, pady=6)
+
+        from onion_search.storage.factory import StorageFactory
+        try:
+            storage = StorageFactory.create(self.backend_var.get(), db_file=DB_FILE, encrypt_storage=self.encrypt_storage_var.get())
+            stats = storage.get_stats()
+            size_mb = stats.get("db_size_bytes", 0) / (1024 * 1024)
+            info_text = f"Aktív találatok: {stats.get('active_results', 0)}  |  Halott címek: {stats.get('dead_urls', 0)}  |  Méret: {size_mb:.2f} MB"
+        except Exception:
+            info_text = "Statisztika nem érhető el"
+
+        ttk.Label(st_frame, text=info_text, font=("TkDefaultFont", 8, "bold"), foreground="#2980b9").pack(anchor=tk.W, pady=2)
 
         e_frame = ttk.LabelFrame(f, text="Export & Karbantartás", padding=10)
         e_frame.pack(fill=tk.X, pady=6)
@@ -359,6 +376,17 @@ class SettingsDialog:
         ttk.Checkbutton(g_frame, text="Eredmények és állapot automatikus mentése kilépéskor", variable=self.auto_save_var).pack(anchor=tk.W, pady=6)
         ttk.Checkbutton(g_frame, text="Sötét téma (Dark Mode) használata", variable=self.dark_mode_var).pack(anchor=tk.W, pady=6)
         ttk.Checkbutton(g_frame, text="Minimalizálás tálcára bezárás helyett", variable=self.minimize_to_tray_var).pack(anchor=tk.W, pady=6)
+
+        s_frame = ttk.LabelFrame(f, text="Seed Plugin Beállítások", padding=10)
+        s_frame.pack(fill=tk.X, pady=4)
+
+        ttk.Checkbutton(s_frame, text="Csak az egészséges (🟢 OK) seed forrásokat használd", variable=self.use_only_healthy_sources_var).pack(anchor=tk.W, pady=4)
+
+        ttl_row = ttk.Frame(s_frame)
+        ttl_row.pack(fill=tk.X, pady=4)
+        ttk.Label(ttl_row, text="Health-Check gyorsítótár TTL (mp):").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Spinbox(ttl_row, from_=60, to=3600, increment=60, textvariable=self.health_check_cache_ttl_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(ttl_row, text="(pl. 600 mp = 10 perc)", font=("TkDefaultFont", 7), foreground="#7f8c8d").pack(side=tk.LEFT, padx=6)
 
     def run_diagnostics(self) -> None:
         if self.on_run_diagnostics_callback:
@@ -419,6 +447,9 @@ class SettingsDialog:
             seed_sources=self.cfg.seed_sources,
             seed_update_interval_hours=self.cfg.seed_update_interval_hours,
             last_seed_update=self.cfg.last_seed_update,
+            health_check_cache_ttl=self.health_check_cache_ttl_var.get(),
+            disabled_plugins=self.cfg.disabled_plugins,
+            use_only_healthy_sources=self.use_only_healthy_sources_var.get(),
             timeout_get=self.timeout_get_var.get(),
             domain_delay=self.domain_delay_var.get(),
             queries=self.cfg.queries,

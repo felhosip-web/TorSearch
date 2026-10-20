@@ -129,7 +129,7 @@ class MainWindow:
         self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
         self.tor_tcp_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_tcp_timeout", 2.0))
         self.tor_socks_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_socks_timeout", 4.0))
-        self.status_var = tk.StringVar(value="Készen - v4.9.4")
+        self.status_var = tk.StringVar(value="Készen - v5.0.0")
 
         # Build UI layout
         self.setup_menu()
@@ -167,11 +167,19 @@ class MainWindow:
             pass
 
     def get_backend(self) -> Any:
-        backend = (
-            self.sqlite_backend
-            if self.backend_var.get() == "sqlite"
-            else self.json_backend
-        )
+        backend_type = self.backend_var.get()
+        if backend_type == "sqlite":
+            backend = self.sqlite_backend
+        elif backend_type == "json":
+            backend = self.json_backend
+        else:
+            from onion_search.storage.factory import StorageFactory
+            backend = StorageFactory.create(
+                backend_type,
+                db_file=DB_FILE,
+                encrypt_storage=self.encrypt_storage_var.get(),
+            )
+
         if hasattr(backend, "encrypt_storage"):
             backend.encrypt_storage = self.encrypt_storage_var.get()
             if backend.encrypt_storage and getattr(backend, "encryptor", None) is None:
@@ -2158,15 +2166,15 @@ class MainWindow:
         threading.Thread(target=_run, daemon=True).start()
 
     def open_seeds_dialog(self) -> None:
-        """Open Seed Manager & Multi-Source Configuration Dialog (Tor66, Deep Search, etc.)."""
+        """Open Seed Manager & Multi-Source Plugin Configuration Dialog."""
         win = tk.Toplevel(self.root)
-        win.title("🌱 Maglista Kezelő & Intelligens Fallback Frissítés")
-        win.geometry("580x680")
+        win.title("🌱 Maglista Kezelő & Plugin Architektúra")
+        win.geometry("640x720")
         win.resizable(False, True)
 
         ttk.Label(
             win,
-            text="Többforrásos Maglista & Prioritásos Fallback Rendszer",
+            text="Seed Források & Plugin Architektúra",
             font=("TkDefaultFont", 11, "bold"),
         ).pack(pady=(12, 4))
 
@@ -2193,74 +2201,132 @@ class MainWindow:
             foreground="#7f8c8d",
         ).pack(anchor=tk.W)
 
-        # Provider Sources Selection (In Prioritized Order)
-        src_frame = ttk.LabelFrame(win, text="Aktív Magforrások & Prioritási Lánc (Fallback < 10 találatnál)", padding=10)
-        src_frame.pack(fill=tk.X, padx=16, pady=6)
-
-        current_sources_str = getattr(
-            self.config_manager.config, "seed_sources", "tor66,deepsearch,haystak,onionland,github,ose,torch,notevil"
+        # Provider Plugin Sources Selection (In Prioritized Order)
+        src_frame = ttk.LabelFrame(
+            win, text="Regisztrált Seed Pluginok (Prioritási Kaszkád & Health-Check Állapot)", padding=10
         )
-        current_sources = [s.strip().lower() for s in current_sources_str.split(",") if s.strip()]
+        src_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=6)
 
-        var_tor66 = tk.BooleanVar(value="tor66" in current_sources)
-        var_deepsearch = tk.BooleanVar(value="deepsearch" in current_sources)
-        var_haystak = tk.BooleanVar(value="haystak" in current_sources)
-        var_onionland = tk.BooleanVar(value="onionland" in current_sources)
-        var_github = tk.BooleanVar(value="github" in current_sources)
-        var_ose = tk.BooleanVar(value="ose" in current_sources)
-        var_torch = tk.BooleanVar(value="torch" in current_sources)
-        var_notevil = tk.BooleanVar(value="notevil" in current_sources)
-        var_ahmia = tk.BooleanVar(value="ahmia" in current_sources)
+        # Scrollable container for plugins
+        canvas = tk.Canvas(src_frame, height=260, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(src_frame, orient="vertical", command=canvas.yview)
+        scroll_frame = ttk.Frame(canvas)
 
+        scroll_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        disabled_plugins_str = getattr(self.config_manager.config, "disabled_plugins", "")
+        disabled_set = {d.strip().lower() for d in disabled_plugins_str.split(",") if d.strip()}
+
+        all_plugins = self.fetcher.seed_manager.registry.get_all_plugins(sorted_by_priority=True)
+        plugin_vars: Dict[str, tk.BooleanVar] = {}
+        plugin_widgets: Dict[str, Dict[str, Any]] = {}
+
+        for plugin in all_plugins:
+            row_frame = ttk.Frame(scroll_frame, padding=2)
+            row_frame.pack(fill=tk.X, expand=True, pady=2)
+
+            var = tk.BooleanVar(value=plugin.id.lower() not in disabled_set and plugin.enabled)
+            plugin_vars[plugin.id] = var
+
+            # Status LED Light: 🟢 (OK), 🔴 (Error), 🟡 (Unknown)
+            led_canvas = tk.Canvas(row_frame, width=12, height=12, highlightthickness=0)
+            led_canvas.pack(side=tk.LEFT, padx=(2, 6))
+
+            status_tuple = getattr(plugin, "_health_status", None)
+            if status_tuple is True or (isinstance(status_tuple, tuple) and status_tuple[0] is True):
+                initial_color = "#2ecc71"
+            elif isinstance(status_tuple, tuple) and status_tuple[0] is False:
+                initial_color = "#e74c3c"
+            else:
+                initial_color = "#f1c40f"
+
+            led_oval = led_canvas.create_oval(1, 1, 11, 11, fill=initial_color, outline="")
+
+            chk = ttk.Checkbutton(
+                row_frame,
+                text=f"[{plugin.priority}] {plugin.name} ({plugin.id})",
+                variable=var,
+            )
+            chk.pack(side=tk.LEFT, anchor=tk.W)
+
+            msg_text = status_tuple[1] if isinstance(status_tuple, tuple) else "Nincs ellenőrizve"
+            status_lbl = ttk.Label(
+                row_frame,
+                text=f"• {msg_text}",
+                font=("TkDefaultFont", 7),
+                foreground="#7f8c8d",
+            )
+            status_lbl.pack(side=tk.RIGHT, padx=4)
+
+            plugin_widgets[plugin.id] = {
+                "canvas": led_canvas,
+                "oval": led_oval,
+                "label": status_lbl,
+            }
+
+        # Health-check options and trigger button
+        hc_frame = ttk.LabelFrame(win, text="Egészségügyi Ellenőrzés (Health-Check)", padding=8)
+        hc_frame.pack(fill=tk.X, padx=16, pady=4)
+
+        use_only_healthy_var = tk.BooleanVar(
+            value=bool(getattr(self.config_manager.config, "use_only_healthy_sources", False))
+        )
         ttk.Checkbutton(
-            src_frame,
-            text="1. 🧅 Tor66 — Elsődleges friss rejtett szolgáltatás katalógus (.onion / tükör)",
-            variable=var_tor66,
-        ).pack(anchor=tk.W, pady=1)
-        ttk.Checkbutton(
-            src_frame,
-            text="2. 🔍 Deep Search — Strukturált címkatalógus & linkgyűjtemény (.onion / tükör)",
-            variable=var_deepsearch,
-        ).pack(anchor=tk.W, pady=1)
-        ttk.Checkbutton(
-            src_frame,
-            text="3. 🌾 Haystak — Történelmi nagy lefedettségű onion kereső (.onion / tükör)",
-            variable=var_haystak,
-        ).pack(anchor=tk.W, pady=1)
-        ttk.Checkbutton(
-            src_frame,
-            text="4. 🗺️ OnionLand — Keresőmotoros mélywebes index (.onion / tükör)",
-            variable=var_onionland,
-        ).pack(anchor=tk.W, pady=1)
-        ttk.Checkbutton(
-            src_frame,
-            text="5. 🐙 GitHub — Kurált onion listák (DanMcInerney, Alec Muffett)",
-            variable=var_github,
-        ).pack(anchor=tk.W, pady=1)
-        ttk.Checkbutton(
-            src_frame,
-            text="6. 🔎 OnionSearchEngine — Keresőmotoros aggregáció",
-            variable=var_ose,
-        ).pack(anchor=tk.W, pady=1)
-        ttk.Checkbutton(
-            src_frame,
-            text="7. 🔦 Torch — Régi, megbízható onion indexelő (.onion / tükör)",
-            variable=var_torch,
-        ).pack(anchor=tk.W, pady=1)
-        ttk.Checkbutton(
-            src_frame,
-            text="8. 👁️ not Evil — Utolsó mentsvár fallback motor (.onion / tükör)",
-            variable=var_notevil,
-        ).pack(anchor=tk.W, pady=1)
-        ttk.Checkbutton(
-            src_frame,
-            text="+ 🌐 Ahmia — Folyamatosan frissülő .onion index (.onion / clearnet)",
-            variable=var_ahmia,
-        ).pack(anchor=tk.W, pady=1)
+            hc_frame,
+            text="Csak az egészséges (🟢 OK) forrásokat használd a gyűjtéshez",
+            variable=use_only_healthy_var,
+        ).pack(anchor=tk.W, pady=2)
+
+        status_lbl = ttk.Label(win, text="", foreground="#27ae60", font=("TkDefaultFont", 9))
+        status_lbl.pack(pady=2)
+
+        def _run_health_checks_thread():
+            status_lbl.config(text="Health-check futtatása...", foreground="#2980b9")
+            proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
+            allow_clearnet = self.allow_clearnet_var.get()
+
+            def _bg():
+                results = self.fetcher.seed_manager.orchestrator.run_health_checks(
+                    proxy_url=proxy, allow_clearnet=allow_clearnet, force=True
+                )
+                def _gui_update():
+                    try:
+                        for pid, (is_ok, msg) in results.items():
+                            if pid in plugin_widgets:
+                                color = "#2ecc71" if is_ok else "#e74c3c"
+                                plugin_widgets[pid]["canvas"].itemconfig(
+                                    plugin_widgets[pid]["oval"], fill=color
+                                )
+                                plugin_widgets[pid]["label"].config(
+                                    text=f"• {msg}",
+                                    foreground="#27ae60" if is_ok else "#c0392b",
+                                )
+                        status_lbl.config(text="Health-check lefutott!", foreground="#27ae60")
+                    except Exception:
+                        pass
+                try:
+                    win.after(0, _gui_update)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_bg, daemon=True).start()
+
+        ttk.Button(
+            hc_frame,
+            text="🔍 Health-Check Futtatása (Összes Plugin)",
+            command=_run_health_checks_thread,
+        ).pack(anchor=tk.W, pady=4)
 
         # Automation Options
-        auto_frame = ttk.LabelFrame(win, text="Automatikus Ütemezés & Beállítások", padding=10)
-        auto_frame.pack(fill=tk.X, padx=16, pady=6)
+        auto_frame = ttk.LabelFrame(win, text="Automatikus Ütemezés", padding=8)
+        auto_frame.pack(fill=tk.X, padx=16, pady=4)
 
         ttk.Checkbutton(
             auto_frame,
@@ -2268,56 +2334,28 @@ class MainWindow:
             variable=self.auto_seed_var,
         ).pack(anchor=tk.W, pady=2)
 
-        int_row = ttk.Frame(auto_frame)
-        int_row.pack(fill=tk.X, pady=4)
-        ttk.Label(int_row, text="Frissítési időköz:").pack(side=tk.LEFT, padx=(0, 6))
-
-        cur_int = int(getattr(self.config_manager.config, "seed_update_interval_hours", 12))
-        interval_var = tk.StringVar(value=f"{cur_int} óra")
-        combo = ttk.Combobox(
-            int_row,
-            textvariable=interval_var,
-            values=["6 óra", "12 óra", "24 óra", "48 óra"],
-            state="readonly",
-            width=14,
-        )
-        combo.pack(side=tk.LEFT)
-
-        status_lbl = ttk.Label(win, text="", foreground="#27ae60", font=("TkDefaultFont", 9))
-        status_lbl.pack(pady=4)
-
-        def _get_selected_sources() -> List[str]:
-            sel = []
-            if var_tor66.get(): sel.append("tor66")
-            if var_deepsearch.get(): sel.append("deepsearch")
-            if var_haystak.get(): sel.append("haystak")
-            if var_onionland.get(): sel.append("onionland")
-            if var_github.get(): sel.append("github")
-            if var_ose.get(): sel.append("ose")
-            if var_torch.get(): sel.append("torch")
-            if var_notevil.get(): sel.append("notevil")
-            if var_ahmia.get(): sel.append("ahmia")
-            return sel or ["tor66", "deepsearch"]
-
         def _save_settings():
-            sel = _get_selected_sources()
-            self.config_manager.config.seed_sources = ",".join(sel)
+            disabled_list = [
+                pid for pid, var in plugin_vars.items() if not var.get()
+            ]
+            selected_list = [
+                pid for pid, var in plugin_vars.items() if var.get()
+            ]
+            self.config_manager.config.disabled_plugins = ",".join(disabled_list)
+            self.config_manager.config.seed_sources = ",".join(selected_list)
             self.config_manager.config.auto_update_seeds = self.auto_seed_var.get()
-            try:
-                val = int(interval_var.get().split()[0])
-                self.config_manager.config.seed_update_interval_hours = float(val)
-            except Exception:
-                pass
+            self.config_manager.config.use_only_healthy_sources = use_only_healthy_var.get()
             self.config_manager.save()
             status_lbl.config(text="Beállítások sikeresen mentve!", foreground="#27ae60")
 
         btn_box = ttk.Frame(win)
         btn_box.pack(fill=tk.X, padx=16, pady=6)
 
-        def _trigger_fetch(sources=None):
+        def _trigger_fetch():
             _save_settings()
             status_lbl.config(text="Maglista letöltése folyamatban...", foreground="#2980b9")
-            self.update_seeds_thread(sources=sources)
+            active_srcs = [pid for pid, var in plugin_vars.items() if var.get()]
+            self.update_seeds_thread(sources=active_srcs)
             win.after(2500, lambda: _refresh_stats())
 
         def _refresh_stats():
@@ -2342,21 +2380,8 @@ class MainWindow:
         row1.pack(fill=tk.X, pady=2)
         ttk.Button(
             row1,
-            text="🔄 Frissítés Most (Kijelölt források)",
-            command=lambda: _trigger_fetch(_get_selected_sources()),
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-
-        row2 = ttk.Frame(btn_box)
-        row2.pack(fill=tk.X, pady=2)
-        ttk.Button(
-            row2,
-            text="🧅 Csak Tor66",
-            command=lambda: _trigger_fetch(["tor66"]),
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        ttk.Button(
-            row2,
-            text="🔍 Csak Deep Search",
-            command=lambda: _trigger_fetch(["deepsearch"]),
+            text="🔄 Frissítés Most (Engedélyezett pluginok)",
+            command=_trigger_fetch,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
         row3 = ttk.Frame(btn_box)

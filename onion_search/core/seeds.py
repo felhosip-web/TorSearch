@@ -13,7 +13,7 @@
 # limitations under the License.
 """
 Multi-source automated seed discovery and synchronization.
-Integrates Tor66, Deep Search, Ahmia, GitHub and OnionSearchEngine lists
+Wraps the Plugin-based SeedOrchestrator architecture for full backward compatibility
 with local JSON cache persistence and strict Tor proxy routing.
 Developed by HES Projects by FePe.
 """
@@ -26,50 +26,36 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import requests
-from bs4 import BeautifulSoup
 
+from onion_search.seeds.base import extract_onion_urls_from_text as extract_onion_urls
+from onion_search.seeds.orchestrator import SeedOrchestrator
+from onion_search.seeds.registry import PluginRegistry, registry as default_registry
 from onion_search.utils.helpers import (
-    AHMIA_SOURCES,
-    DEEPSEARCH_SOURCES,
     DEFAULT_SEED_PRIORITY,
-    GITHUB_SOURCES,
-    HAYSTAK_SOURCES,
     HEADERS_LIST,
     MIN_SEED_YIELD_THRESHOLD,
-    NOTEVIL_SOURCES,
-    ONIONLAND_SOURCES,
-    OSE_SOURCES,
     SEEDS_FILE,
-    TIMEOUT_GET,
-    TOR66_SOURCES,
-    TORCH_SOURCES,
-    normalize_onion_url,
 )
 
 logger = logging.getLogger("onion_search")
-ONION_REGEX = re.compile(r"\b(?:https?://)?([a-z2-7]{16,56}\.onion)(?:/[^\s\"'<>]*)?", re.IGNORECASE)
-
-
-def extract_onion_urls(text: str) -> Set[str]:
-    """Extract and normalize all valid .onion URLs from raw text/HTML."""
-    found: Set[str] = set()
-    if not text:
-        return found
-    for match in ONION_REGEX.finditer(text):
-        raw_match = match.group(0)
-        norm = normalize_onion_url(raw_match)
-        if norm:
-            found.add(norm)
-    return found
 
 
 class SeedManager:
-    """Coordinates fetching and caching .onion seeds across multiple providers."""
+    """
+    Coordinates fetching and caching .onion seeds across multiple providers
+    using the Plugin Architecture and SeedOrchestrator.
+    """
 
-    def __init__(self, cache_file: Path = SEEDS_FILE) -> None:
+    def __init__(
+        self,
+        cache_file: Path = SEEDS_FILE,
+        plugin_registry: Optional[PluginRegistry] = None,
+    ) -> None:
         self.cache_file = Path(cache_file)
         self.last_update_ts: float = 0.0
         self.cached_seeds: Set[str] = set()
+        self.registry = plugin_registry or default_registry
+        self.orchestrator = SeedOrchestrator(plugin_registry=self.registry)
         self.load_cache()
 
     def load_cache(self) -> Set[str]:
@@ -117,302 +103,101 @@ class SeedManager:
         elapsed_hours = (time.time() - self.last_update_ts) / 3600.0
         return elapsed_hours >= interval_hours
 
-    def _make_request(
+    def _fetch_from_plugin(
         self,
-        url: str,
+        plugin_id: str,
         proxy_url: Optional[str] = None,
         allow_clearnet: bool = False,
-        timeout: int = 15,
-    ) -> Optional[str]:
-        """Execute HTTP request enforcing Tor proxy policy."""
-        is_onion = ".onion" in url
-        if is_onion and not proxy_url:
-            logger.warning(f"[SECURITY] .onion seed forrás kihagyva, mert nincs Tor proxy: {url}")
-            return None
-
-        if not is_onion and not allow_clearnet and not proxy_url:
-            logger.warning(f"[SECURITY] Clearnet seed forrás blokkolva Tor-only védelem miatt: {url}")
-            return None
-
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        headers = random.choice(HEADERS_LIST)
-        try:
-            r = requests.get(url, timeout=timeout, headers=headers, proxies=proxies)
-            if r.status_code == 200:
-                return r.text
-        except Exception as e:
-            logger.debug(f"[SEED] Lekérési hiba ({url}): {e}")
-        return None
+        query: Optional[str] = None,
+    ) -> Set[str]:
+        """Helper delegating fetching to a registered plugin."""
+        plugin = self.registry.get_plugin(plugin_id)
+        if plugin:
+            return plugin.fetch_seeds(
+                query=query, proxy_url=proxy_url, allow_clearnet=allow_clearnet
+            )
+        return set()
 
     def fetch_tor66(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """
-        Fetch fresh onion seeds from Tor66 hidden service directory.
-        Tries Tor66 .onion service first if proxy is active, then clearnet mirror.
-        """
-        found: Set[str] = set()
-        endpoints = []
-        if proxy_url:
-            endpoints.append(TOR66_SOURCES["onion"])
-        if allow_clearnet or proxy_url:
-            endpoints.append(TOR66_SOURCES["clearnet"])
-            endpoints.append(TOR66_SOURCES["clearnet_alt"])
-
-        for ep in endpoints:
-            text = self._make_request(
-                ep, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=18
-            )
-            if text:
-                urls = extract_onion_urls(text)
-                found.update(urls)
-                if len(found) > 10:
-                    break
-        return found
+        return self._fetch_from_plugin("tor66", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_deepsearch(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """
-        Fetch onion seeds from Deep Search directory and search endpoints.
-        """
-        found: Set[str] = set()
-        endpoints = []
-        if proxy_url:
-            endpoints.append(DEEPSEARCH_SOURCES["onion"])
-        if allow_clearnet or proxy_url:
-            endpoints.append(DEEPSEARCH_SOURCES["clearnet"])
-            endpoints.append(DEEPSEARCH_SOURCES["clearnet_alt"])
-
-        for ep in endpoints:
-            text = self._make_request(
-                ep, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=18
-            )
-            if text:
-                urls = extract_onion_urls(text)
-                found.update(urls)
-                if len(found) > 10:
-                    break
-        return found
+        return self._fetch_from_plugin("deepsearch", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_ahmia(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """Fetch discovered onions from Ahmia index list."""
-        endpoints = []
-        if proxy_url:
-            endpoints.append(AHMIA_SOURCES["onion"])
-        if allow_clearnet or proxy_url:
-            endpoints.append(AHMIA_SOURCES["clearnet"])
-
-        for ep in endpoints:
-            text = self._make_request(
-                ep, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=15
-            )
-            if text:
-                return extract_onion_urls(text)
-        return set()
+        return self._fetch_from_plugin("ahmia", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_github(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """Fetch vetted .onion collections from curated GitHub repositories."""
-        found: Set[str] = set()
-        for src in GITHUB_SOURCES:
-            text = self._make_request(
-                src, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=15
-            )
-            if text:
-                found.update(extract_onion_urls(text))
-        return found
+        return self._fetch_from_plugin("github", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_ose(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """Fetch discovered onion sites from OnionSearchEngine."""
-        ep = OSE_SOURCES.get("clearnet")
-        if not ep:
-            return set()
-        text = self._make_request(
-            ep, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=15
-        )
-        if text:
-            return extract_onion_urls(text)
-        return set()
+        return self._fetch_from_plugin("ose", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_haystak(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """Fetch discovered onions from Haystak search engine."""
-        found: Set[str] = set()
-        endpoints = []
-        if proxy_url:
-            endpoints.append(HAYSTAK_SOURCES["onion"])
-        if allow_clearnet or proxy_url:
-            endpoints.append(HAYSTAK_SOURCES["clearnet"])
-            if "clearnet_alt" in HAYSTAK_SOURCES:
-                endpoints.append(HAYSTAK_SOURCES["clearnet_alt"])
-
-        for ep in endpoints:
-            text = self._make_request(
-                ep, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=15
-            )
-            if text:
-                urls = extract_onion_urls(text)
-                found.update(urls)
-                if len(found) >= MIN_SEED_YIELD_THRESHOLD:
-                    break
-        return found
+        return self._fetch_from_plugin("haystak", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_onionland(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """Fetch discovered onions from OnionLand search engine."""
-        found: Set[str] = set()
-        endpoints = []
-        if proxy_url:
-            endpoints.append(ONIONLAND_SOURCES["onion"])
-        if allow_clearnet or proxy_url:
-            endpoints.append(ONIONLAND_SOURCES["clearnet"])
-            if "clearnet_alt" in ONIONLAND_SOURCES:
-                endpoints.append(ONIONLAND_SOURCES["clearnet_alt"])
-
-        for ep in endpoints:
-            text = self._make_request(
-                ep, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=15
-            )
-            if text:
-                urls = extract_onion_urls(text)
-                found.update(urls)
-                if len(found) >= MIN_SEED_YIELD_THRESHOLD:
-                    break
-        return found
+        return self._fetch_from_plugin("onionland", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_torch(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """Fetch discovered onions from Torch search engine."""
-        found: Set[str] = set()
-        endpoints = []
-        if proxy_url:
-            endpoints.append(TORCH_SOURCES["onion"])
-        if allow_clearnet or proxy_url:
-            endpoints.append(TORCH_SOURCES["clearnet"])
-
-        for ep in endpoints:
-            text = self._make_request(
-                ep, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=15
-            )
-            if text:
-                urls = extract_onion_urls(text)
-                found.update(urls)
-                if len(found) >= MIN_SEED_YIELD_THRESHOLD:
-                    break
-        return found
+        return self._fetch_from_plugin("torch", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_notevil(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
     ) -> Set[str]:
-        """Fetch discovered onions from not Evil search engine (last resort fallback)."""
-        found: Set[str] = set()
-        endpoints = []
-        if proxy_url:
-            endpoints.append(NOTEVIL_SOURCES["onion"])
-        if allow_clearnet or proxy_url:
-            endpoints.append(NOTEVIL_SOURCES["clearnet"])
-
-        for ep in endpoints:
-            text = self._make_request(
-                ep, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=15
-            )
-            if text:
-                urls = extract_onion_urls(text)
-                found.update(urls)
-                if len(found) >= MIN_SEED_YIELD_THRESHOLD:
-                    break
-        return found
+        return self._fetch_from_plugin("notevil", proxy_url=proxy_url, allow_clearnet=allow_clearnet)
 
     def fetch_all(
         self,
         proxy_url: Optional[str] = None,
         allow_clearnet: bool = False,
         selected_sources: Optional[List[str]] = None,
+        use_only_healthy: bool = False,
         min_yield_threshold: int = MIN_SEED_YIELD_THRESHOLD,
         target_total_seeds: Optional[int] = None,
+        query: Optional[str] = None,
         on_source_progress: Optional[Callable[[str, int], None]] = None,
     ) -> Tuple[Set[str], Dict[str, int]]:
         """
-        Query seed providers in prioritized fallback order:
-        1. Tor66 -> 2. Deep Search -> 3. Haystak -> 4. OnionLand ->
-        5. GitHub curated -> 6. OnionSearchEngine -> 7. Torch -> 8. not Evil (last resort).
-
-        If a provider yields 0 or fewer than min_yield_threshold (< 10) valid .onion
-        addresses, it automatically logs a fallback notice and proceeds to the next provider.
+        Query seed providers via SeedOrchestrator priority cascade.
+        Dispatches via instance methods (supporting monkeypatching/overrides).
+        Updates persistent cache upon completion.
         """
-        source_dispatch: Dict[str, Callable[[], Set[str]]] = {
-            "tor66": lambda: self.fetch_tor66(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-            "deepsearch": lambda: self.fetch_deepsearch(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-            "haystak": lambda: self.fetch_haystak(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-            "onionland": lambda: self.fetch_onionland(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-            "github": lambda: self.fetch_github(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-            "ose": lambda: self.fetch_ose(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-            "torch": lambda: self.fetch_torch(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-            "notevil": lambda: self.fetch_notevil(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-            "ahmia": lambda: self.fetch_ahmia(proxy_url=proxy_url, allow_clearnet=allow_clearnet),
-        }
+        known_sources = ["tor66", "deepsearch", "haystak", "onionland", "github", "ose", "torch", "notevil", "ahmia"]
+        source_dispatch = {}
+        for s in known_sources:
+            method = getattr(self, f"fetch_{s}", None)
+            if method:
+                # Capture method in default parameter
+                source_dispatch[s] = (lambda m=method: m(proxy_url=proxy_url, allow_clearnet=allow_clearnet))
 
-        # Respect user selection while enforcing the strict priority sequence
-        if selected_sources:
-            norm_selected = [s.strip().lower() for s in selected_sources]
-            candidates = [s for s in DEFAULT_SEED_PRIORITY if s in norm_selected]
-            for s in norm_selected:
-                if s not in candidates and s in source_dispatch:
-                    candidates.append(s)
-        else:
-            candidates = list(DEFAULT_SEED_PRIORITY)
-
-        source_counts: Dict[str, int] = {}
-        all_found: Set[str] = set()
-
-        logger.info(
-            f"[SEED] Maggyűjtés indítása prioritási sorrendben: {', '.join(candidates)} "
-            f"(minimális hozamküszöb: {min_yield_threshold} db/forrás)"
+        all_found, source_counts = self.orchestrator.fetch_all(
+            proxy_url=proxy_url,
+            allow_clearnet=allow_clearnet,
+            selected_sources=selected_sources,
+            use_only_healthy=use_only_healthy,
+            min_yield_threshold=min_yield_threshold,
+            target_total_seeds=target_total_seeds,
+            query=query,
+            on_source_progress=on_source_progress,
+            source_dispatch=source_dispatch,
         )
-
-        for src_name in candidates:
-            fetch_fn = source_dispatch.get(src_name)
-            if not fetch_fn:
-                continue
-
-            logger.info(f"[SEED] Lekérdezés indítása: {src_name.upper()}...")
-            try:
-                seeds = fetch_fn()
-                count = len(seeds)
-                source_counts[src_name] = count
-                all_found.update(seeds)
-
-                if on_source_progress:
-                    on_source_progress(src_name, count)
-
-                if count < min_yield_threshold:
-                    logger.warning(
-                        f"[SEED-FALLBACK] {src_name.upper()} alacsony hozam ({count} < {min_yield_threshold} mag). "
-                        f"Intelligens fallback léptetés a következő prioritási forrásra..."
-                    )
-                else:
-                    logger.info(f"[SEED] {src_name.upper()}: sikeres hozam ({count} mag találva)")
-
-                # If caller specified target total yield and we exceeded it, we can stop early
-                if target_total_seeds is not None and len(all_found) >= target_total_seeds:
-                    logger.info(
-                        f"[SEED] Cél hozam elérve ({len(all_found)} >= {target_total_seeds}), "
-                        f"további fallback források lekérdezése nem szükséges."
-                    )
-                    break
-
-            except Exception as e:
-                logger.error(f"[SEED-ERROR] Hiba a(z) {src_name} forrás lekérésekor: {e}. Fallback aktiválva.")
-                source_counts[src_name] = 0
 
         # Update persistent cache
         combined = set(self.cached_seeds).union(all_found)

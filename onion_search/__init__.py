@@ -17,7 +17,7 @@ Modular architecture for Onion Search application.
 Developed by HES Projects by FePe.
 """
 
-__version__ = "4.9.3"
+__version__ = "5.0.0"
 __author__ = "HES Projects by FePe"
 __license__ = "Apache-2.0"
 __copyright__ = "Copyright 2026 HES Projects by FePe"

@@ -247,13 +247,15 @@ class OnionFetcher:
         proxy_url: Optional[str] = None,
         allow_clearnet: bool = False,
         selected_sources: Optional[List[str]] = None,
+        use_only_healthy: bool = False,
         on_source_progress: Optional[Callable[[str, int], None]] = None,
     ) -> Tuple[Set[str], Dict[str, int]]:
-        """Fetch and aggregate seeds from all sources (Tor66, Deep Search, Ahmia, GitHub, OSE)."""
+        """Fetch and aggregate seeds from all plugin sources."""
         return self.seed_manager.fetch_all(
             proxy_url=proxy_url,
             allow_clearnet=allow_clearnet,
             selected_sources=selected_sources,
+            use_only_healthy=use_only_healthy,
             on_source_progress=on_source_progress,
         )
 

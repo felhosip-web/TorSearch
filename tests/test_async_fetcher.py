@@ -142,3 +142,46 @@ def test_async_domain_rate_limiter():
 
     elapsed = asyncio.run(_test())
     assert elapsed >= 0.08
+
+
+def test_shared_sync_and_async_rate_limiter():
+    """Verify sync wait_for_domain and async async_wait_for_domain share state consistently."""
+    limiter = DomainRateLimiter(min_domain_delay=0.1)
+
+    limiter.wait_for_domain("testdomain.onion")
+    # Immediate second call in async mode should detect last request time
+    async def _test():
+        start = asyncio.get_event_loop().time()
+        await limiter.async_wait_for_domain("testdomain.onion")
+        end = asyncio.get_event_loop().time()
+        return end - start
+
+    elapsed = asyncio.run(_test())
+    assert elapsed >= 0.05
+
+
+def test_socks5h_proxy_preservation(monkeypatch):
+    """Verify fetch_url preserves socks5h:// URL format for Tor DNS resolution."""
+    fetcher = OnionFetcher()
+    monkeypatch.setattr("onion_search.core.fetcher.HTTPX_AVAILABLE", True)
+
+    captured_kwargs = {}
+
+    class MockAsyncClient:
+        def __init__(self, **kwargs):
+            nonlocal captured_kwargs
+            captured_kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    monkeypatch.setattr("httpx.AsyncClient", MockAsyncClient)
+    monkeypatch.setattr(fetcher, "async_fetch_page_httpx", AsyncMock(return_value={"status": "ok"}))
+
+    res = fetcher.fetch_url("http://example.onion", "socks5h://127.0.0.1:9050", async_mode=True)
+
+    assert res["status"] == "ok"
+    assert captured_kwargs.get("proxy") == "socks5h://127.0.0.1:9050"

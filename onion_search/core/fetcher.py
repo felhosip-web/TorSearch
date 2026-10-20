@@ -637,18 +637,23 @@ class OnionFetcher:
             return self.fetch_page(url, proxy_url, is_running_cb=is_running_cb)
 
         try:
-            proxy_clean = proxy_url
-            if proxy_clean and proxy_clean.startswith("socks5h://"):
-                proxy_clean = proxy_clean.replace("socks5h://", "socks5://")
-
             async def _run_async():
                 transport_kwargs = {}
-                if proxy_clean:
-                    transport_kwargs["proxy"] = proxy_clean
+                if proxy_url:
+                    transport_kwargs["proxy"] = proxy_url
                 async with httpx.AsyncClient(timeout=TIMEOUT_GET, follow_redirects=True, **transport_kwargs) as client:
                     return await self.async_fetch_page_httpx(client, url, is_running_cb=is_running_cb)
 
-            return asyncio.run(_run_async())
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(_run_async(), loop)
+                return future.result()
+            else:
+                return asyncio.run(_run_async())
         except Exception as e:
             logging.getLogger("onion_search").warning(
                 f"[ASYNC MODE HIBA] {e}. Visszaállás szinkron módra."

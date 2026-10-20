@@ -3083,16 +3083,13 @@ class MainWindow:
         if async_mode:
             try:
                 import httpx
-                proxy_clean = proxy
-                if proxy_clean and proxy_clean.startswith("socks5h://"):
-                    proxy_clean = proxy_clean.replace("socks5h://", "socks5://")
 
                 async def _async_search():
                     nonlocal completed
                     sem = asyncio.Semaphore(workers)
                     transport_kwargs = {}
-                    if proxy_clean:
-                        transport_kwargs["proxy"] = proxy_clean
+                    if proxy:
+                        transport_kwargs["proxy"] = proxy
 
                     async with httpx.AsyncClient(timeout=TIMEOUT_GET, follow_redirects=True, **transport_kwargs) as client:
                         async def _task(u):
@@ -3130,8 +3127,9 @@ class MainWindow:
                                     c_snap = completed
                                     self.root.after(0, lambda c=c_snap: _flush_ui(c))
 
-                        tasks = [_task(u) for u in new_urls]
-                        await asyncio.gather(*tasks, return_exceptions=True)
+                        tasks = [asyncio.create_task(_task(u)) for u in new_urls]
+                        if tasks:
+                            await asyncio.gather(*tasks, return_exceptions=True)
 
                 import asyncio
                 asyncio.run(_async_search())

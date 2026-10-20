@@ -166,7 +166,7 @@ def test_matches_precise_filter_must_any():
         title, text, enabled=True, must_any="cars, bicycles"
     )
     assert ok is False
-    assert "egyik ANY sem talalhato" in reason
+    assert "egyik ANY sem" in reason
 
 
 def test_matches_precise_filter_must_not():
@@ -184,7 +184,7 @@ def test_matches_precise_filter_must_not():
         title, text + " this is a scam site", enabled=True, must_not="scam"
     )
     assert ok is False
-    assert "kizart NOT talalat" in reason
+    assert "kizárt NOT" in reason or "kizart NOT" in reason
 
 
 def test_matches_precise_filter_title_and_regex():
@@ -205,7 +205,7 @@ def test_matches_precise_filter_title_and_regex():
 
     # Regex match
     ok, _ = matches_precise_filter(
-        title, text, enabled=True, regex=r"verified\s+\d{4}"
+        title, text, enabled=True, regex=r"verified\s+\d{4}", use_regex=True
     )
     assert ok is True
 

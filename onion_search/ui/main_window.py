@@ -2159,75 +2159,97 @@ class MainWindow:
     def update_seeds_thread(
         self, sources: Optional[List[str]] = None, silent: bool = False
     ) -> None:
-        """Fetch fresh seeds across multiple providers (Tor66, Deep Search, Ahmia, GitHub, OSE)."""
+        """Fetch fresh seeds across multiple providers non-blockingly without freezing Tkinter event loop."""
+        # Disable buttons on UI thread
+        try:
+            self.btn_seeds.config(state=tk.DISABLED)
+            self.btn_seeds_cfg.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
         def _run() -> None:
-            proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
-            allow_clearnet = self.allow_clearnet_var.get()
-            active_sources = sources or parse_list(
-                getattr(self.config_manager.config, "seed_sources", "tor66,deepsearch,ahmia,github,ose")
-            )
-            if not silent:
-                src_names = ", ".join([s.upper() for s in active_sources])
-                self.log_msg(
-                    f"[SEED] Maglista frissítés indítása ({src_names})...",
-                    force=True,
-                    tag="start",
+            try:
+                proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
+                allow_clearnet = self.allow_clearnet_var.get()
+                active_sources = sources or parse_list(
+                    getattr(self.config_manager.config, "seed_sources", "tor66,deepsearch,ahmia,github,ose")
                 )
-                self.set_statusbar_color("#2980b9", msg=f"Maglista letöltése ({src_names})...")
-
-            def _on_progress(src_name: str, count: int) -> None:
-                self.log_msg(f"[SEED] {src_name.upper()}: {count} cím találva", force=True, tag="info")
-
-            found, counts = self.fetcher.fetch_all_seeds(
-                proxy_url=proxy,
-                allow_clearnet=allow_clearnet,
-                selected_sources=active_sources,
-                on_source_progress=_on_progress,
-            )
-
-            if not found and not allow_clearnet and not proxy:
                 if not silent:
+                    src_names = ", ".join([s.upper() for s in active_sources])
                     self.log_msg(
-                        "[SECURITY] Maglista frissítés blokkolva: Tor proxy nem elérhető és Clearnet tiltva!",
+                        f"[SEED] Maglista frissítés indítása ({src_names})...",
                         force=True,
-                        tag="tor_err",
+                        tag="start",
                     )
-                    self.set_statusbar_color("#e67e22", msg="Maglista tiltva (Tor-only aktív)")
-                return
+                    self.set_statusbar_color("#2980b9", msg=f"Maglista letöltése ({src_names})...")
 
-            # Deduplicate against checked and dead sets
-            new_seeds = [
-                u for u in found
-                if (normalize_onion_url(u) or u) not in self.checked_urls and (normalize_onion_url(u) or u) not in self.dead_blacklist
-            ]
+                def _on_progress(src_name: str, count: int) -> None:
+                    self.log_msg(f"[SEED] {src_name.upper()}: {count} cím találva", force=True, tag="info")
 
-            def _update_ui() -> None:
-                try:
-                    if new_seeds:
-                        existing = self.extra_text.get("1.0", tk.END)
-                        existing_set = set(
-                            re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", existing)
-                        )
-                        to_add = [u for u in new_seeds if u not in existing_set]
-                        if to_add:
-                            self.extra_text.insert(tk.END, "\n".join(to_add[:600]) + "\n")
+                found, counts = self.fetcher.fetch_all_seeds(
+                    proxy_url=proxy,
+                    allow_clearnet=allow_clearnet,
+                    selected_sources=active_sources,
+                    on_source_progress=_on_progress,
+                )
+
+                if not found and not allow_clearnet and not proxy:
                     if not silent:
-                        detail = ", ".join([f"{k}: {v}" for k, v in counts.items()])
                         self.log_msg(
-                            f"[SEED] Sikeres frissítés! {len(found)} összes mag ({detail}), {len(new_seeds)} új cím hozzáadva.",
+                            "[SECURITY] Maglista frissítés blokkolva: Tor proxy nem elérhető és Clearnet tiltva!",
                             force=True,
-                            tag="save",
+                            tag="tor_err",
                         )
-                        self.set_statusbar_color(
-                            "#27ae60", msg=f"Maglista frissítve: {len(found)} cím"
-                        )
+                        self.set_statusbar_color("#e67e22", msg="Maglista tiltva (Tor-only aktív)")
+                    return
+
+                new_seeds = [
+                    u for u in found
+                    if (normalize_onion_url(u) or u) not in self.checked_urls and (normalize_onion_url(u) or u) not in self.dead_blacklist
+                ]
+
+                def _update_ui() -> None:
+                    try:
+                        if new_seeds:
+                            existing = self.extra_text.get("1.0", tk.END)
+                            existing_set = set(
+                                re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", existing)
+                            )
+                            to_add = [u for u in new_seeds if u not in existing_set]
+                            if to_add:
+                                self.extra_text.insert(tk.END, "\n".join(to_add[:600]) + "\n")
+                        if not silent:
+                            detail = ", ".join([f"{k}: {v}" for k, v in counts.items()])
+                            self.log_msg(
+                                f"[SEED] Sikeres frissítés! {len(found)} összes mag ({detail}), {len(new_seeds)} új cím hozzáadva.",
+                                force=True,
+                                tag="save",
+                            )
+                            self.set_statusbar_color(
+                                "#27ae60", msg=f"Maglista frissítve: {len(found)} cím"
+                            )
+                    except Exception:
+                        pass
+
+                try:
+                    self.root.after(0, _update_ui)
                 except Exception:
                     pass
-
-            try:
-                self.root.after(0, _update_ui)
-            except Exception:
-                pass
+            except Exception as e:
+                err_msg = str(e)
+                self.log_msg(f"[SEED HIBA] Hiba történt a maglista frissítése során: {err_msg}", force=True, tag="error")
+                self.set_statusbar_color("#c0392b", msg=f"Maglista frissítési hiba: {err_msg[:40]}")
+            finally:
+                def _reenable_buttons() -> None:
+                    try:
+                        self.btn_seeds.config(state=tk.NORMAL)
+                        self.btn_seeds_cfg.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                try:
+                    self.root.after(0, _reenable_buttons)
+                except Exception:
+                    pass
 
         threading.Thread(target=_run, daemon=True).start()
 

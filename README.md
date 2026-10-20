@@ -271,4 +271,4 @@ Ez a szoftver **kizárólag oktatási, kiberbiztonsági kutatási és jogszerű 
 
 - **Szerző / Fejlesztő**: **HES Projects by FePe**
 - **Kapcsolat & Projekt**: Nyílt forráskódú fejlesztés
-- **Kiadás**: Onion Kereső (v4.9.x)
+- **Kiadás**: Onion Kereső (v5.0.0)

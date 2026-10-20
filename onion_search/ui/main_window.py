@@ -129,7 +129,7 @@ class MainWindow:
         self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
         self.tor_tcp_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_tcp_timeout", 2.0))
         self.tor_socks_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_socks_timeout", 4.0))
-        self.status_var = tk.StringVar(value="Készen - v4.9.4")
+        self.status_var = tk.StringVar(value="Készen - v5.0.0")
 
         # Build UI layout
         self.setup_menu()

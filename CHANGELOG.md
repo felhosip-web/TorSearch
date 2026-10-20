@@ -1,5 +1,42 @@
 # Changelog
 
+## [5.0.0] - 2026-10-20
+
+### Hozzáadva
+- **Tor kapcsolat diagnosztika és automatikus beállítás**
+  - 9050 / 9150 SOCKS + ControlPort ellenőrzés
+  - IsTor verifikáció, válaszidő mérés
+  - Fast-path a legutóbb működő portra
+  - Részletes, magyar nyelvű hibaüzenetek és megoldási javaslatok
+  - Manuális újrafuttatás az Eszközök menüből
+- **Átfogó tabbed Beállítások dialógus** (Ctrl+,)
+  - Tor / Hálózat, Crawler, Szűrés, Adatbázis, Általános fülek
+  - Validáció, alapértelmezések visszaállítása, tooltip-ek
+- **Plugin-alapú seed rendszer**
+  - `BaseSeedPlugin` absztrakt interfész
+  - Automatikus plugin-felfedezés (`seeds/plugins/`)
+  - `SeedOrchestrator` prioritásos kaszkád + health-check
+  - Beépített pluginok: Tor66, Deep Search, Haystak, OnionLand, GitHub, OSE, Torch, not Evil, Ahmia
+  - `CustomUrlRegexPlugin` (egyéni URL + regex/CSS)
+  - Vizuális állapotjelzők (🟢/🟡/🔴) a GUI-ban
+- **Cserélhető Storage absztrakció**
+  - `BaseStorage` protokoll
+  - `SQLiteStorage` (WAL mód, batch insert, indexek, busy timeout)
+  - `StorageFactory` + regisztrálható backend-ek
+  - JSON backend + PostgreSQL váz a jövőbeli skálázáshoz
+- Konfigurálható Tor timeout-ok (`tor_tcp_timeout`, `tor_socks_timeout`)
+- Port és beállítások tartós mentése
+
+### Megváltoztatva
+- Seed gyűjtés teljesen plugin-alapúvá alakítva (visszamenőleges kompatibilitás megmaradt)
+- Storage réteg absztrakt interfész mögé rejtve
+- Beállítások centralizálva a tabbed dialógusba
+
+### Javítva
+- Indítási race condition a Tor diagnosztikánál
+- SQLite írási lock és teljesítmény (WAL + batch)
+- Seed források törékenysége (health-check + automatikus kihagyás)
+
 ## [4.9.4] - 2026-10-18
 ### Hozzáadva
 - URL normalizálás (`normalize_onion_url`)

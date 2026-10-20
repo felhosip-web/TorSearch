@@ -78,6 +78,7 @@ DEFAULT_EXPORT_FORMAT: str = "csv"
 DEFAULT_AUTO_TOR_DIAGNOSTICS: bool = True
 DEFAULT_MINIMIZE_TO_TRAY: bool = False
 DEFAULT_HEALTH_CHECK_CACHE_TTL: float = 600.0
+DEFAULT_ASYNC_MODE: bool = False
 
 
 @dataclass
@@ -123,6 +124,7 @@ class AppConfig:
     export_default_format: str = DEFAULT_EXPORT_FORMAT
     auto_tor_diagnostics_on_startup: bool = DEFAULT_AUTO_TOR_DIAGNOSTICS
     minimize_to_tray: bool = DEFAULT_MINIMIZE_TO_TRAY
+    async_mode: bool = DEFAULT_ASYNC_MODE
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":

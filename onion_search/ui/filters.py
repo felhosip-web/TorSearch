@@ -34,8 +34,9 @@ def matches_precise_filter(
     min_len: int = 0,
     lang: str = "",
     category: str = "",
+    use_regex: bool = False,
 ) -> Tuple[bool, str]:
-    """Pure filtering function for testing and standalone execution."""
+    """Pure filtering function for testing and standalone execution with regex injection & ReDoS protection."""
     if not enabled:
         return True, "OK"
     t_lower: str = (title + " " + text).lower()
@@ -43,32 +44,84 @@ def matches_precise_filter(
 
     must_all_list: List[str] = parse_list(must_all)
     for kw in must_all_list:
-        if kw not in t_lower:
-            return False, f"hiányzik MUST ALL: {kw}"
+        if use_regex:
+            if len(kw) > 250:
+                return False, f"Túl hosszú regex mintázat (>250): {kw[:20]}..."
+            pat = kw
+        else:
+            pat = re.escape(kw)
+        try:
+            if not re.search(pat, t_lower, re.IGNORECASE):
+                return False, f"hiányzik MUST ALL: {kw}"
+        except re.error as e:
+            return False, f"regex hiba MUST ALL: {e}"
 
     must_any_list: List[str] = parse_list(must_any)
     if must_any_list:
-        if not any(kw in t_lower for kw in must_any_list):
-            return False, f"egyik ANY sem talalhato: {must_any_list}"
+        any_found = False
+        for kw in must_any_list:
+            if use_regex:
+                if len(kw) > 250:
+                    continue
+                pat = kw
+            else:
+                pat = re.escape(kw)
+            try:
+                if re.search(pat, t_lower, re.IGNORECASE):
+                    any_found = True
+                    break
+            except re.error:
+                pass
+        if not any_found:
+            return False, f"egyik ANY sem található: {must_any_list}"
 
     must_not_list: List[str] = parse_list(must_not)
     for kw in must_not_list:
-        if kw in t_lower:
-            return False, f"kizart NOT talalat: {kw}"
+        if use_regex:
+            if len(kw) > 250:
+                return False, f"Túl hosszú regex mintázat (>250): {kw[:20]}..."
+            pat = kw
+        else:
+            pat = re.escape(kw)
+        try:
+            if re.search(pat, t_lower, re.IGNORECASE):
+                return False, f"kizárt NOT találat: {kw}"
+        except re.error as e:
+            return False, f"regex hiba MUST NOT: {e}"
 
-    title_c: str = title_contains.strip().lower()
+    title_c: str = title_contains.strip()
     if title_c:
         tcs: List[str] = [p.strip() for p in title_c.split(",") if p.strip()]
-        if not any(tc in title_lower for tc in tcs):
-            return False, f"cim nem tartalmazza: {title_c}"
+        title_found = False
+        for tc in tcs:
+            if use_regex:
+                if len(tc) > 250:
+                    continue
+                pat = tc
+            else:
+                pat = re.escape(tc)
+            try:
+                if re.search(pat, title_lower, re.IGNORECASE):
+                    title_found = True
+                    break
+            except re.error:
+                pass
+        if not title_found:
+            return False, f"cím nem tartalmazza: {title_c}"
 
     if min_len and len(text) < min_len:
-        return False, f"tul rovid {len(text)} < {min_len}"
+        return False, f"túl rövid {len(text)} < {min_len}"
 
     regex_pat: str = regex.strip()
     if regex_pat:
+        if use_regex:
+            if len(regex_pat) > 250:
+                return False, f"Túl hosszú regex kifejezés (>250 kar)"
+            pat = regex_pat
+        else:
+            pat = re.escape(regex_pat)
         try:
-            if not re.search(regex_pat, text, re.IGNORECASE):
+            if not re.search(pat, text, re.IGNORECASE):
                 return False, f"regex nem illeszkedik: {regex_pat}"
         except re.error as e:
             return False, f"regex hiba: {e}"
@@ -97,6 +150,7 @@ class FilterPanel(ttk.Frame):
         self.min_len_var = tk.IntVar(value=0)
         self.save_only_filtered_var = tk.BooleanVar(value=True)
         self.live_filter_var = tk.BooleanVar(value=True)
+        self.use_regex_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         self._setup_traces()
@@ -143,6 +197,9 @@ class FilterPanel(ttk.Frame):
         ).pack(side=tk.LEFT, padx=4)
         ttk.Checkbutton(
             row2, text="⚡ Élő szűrés", variable=self.live_filter_var
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(
+            row2, text="Regex mód", variable=self.use_regex_var
         ).pack(side=tk.LEFT, padx=4)
         ttk.Button(row2, text="Szűrés Ctrl+F", command=self._trigger_change).pack(
             side=tk.LEFT, padx=4
@@ -206,6 +263,7 @@ class FilterPanel(ttk.Frame):
             self.regex_var,
             self.min_len_var,
             self.enable_precise_var,
+            self.use_regex_var,
         ]:
             try:
                 var.trace_add("write", _on_var_change)
@@ -224,6 +282,7 @@ class FilterPanel(ttk.Frame):
         self.regex_var.set("")
         self.min_len_var.set(0)
         self.enable_precise_var.set(False)
+        self.use_regex_var.set(False)
         self.lbl_precise_info.config(text="")
         self._trigger_change()
 
@@ -247,6 +306,7 @@ class FilterPanel(ttk.Frame):
             min_len=self.min_len_var.get(),
             lang=lang,
             category=category,
+            use_regex=self.use_regex_var.get(),
         )
 
     def is_item_visible(self, item: Dict[str, Any]) -> Tuple[bool, str]:

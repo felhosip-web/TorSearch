@@ -73,6 +73,7 @@ class SettingsDialog:
         self.workers_var = tk.IntVar(value=int(getattr(cfg, "workers", 6)))
         self.domain_delay_var = tk.DoubleVar(value=float(getattr(cfg, "domain_delay", 0.7)))
         self.timeout_get_var = tk.IntVar(value=int(getattr(cfg, "timeout_get", 20)))
+        self.async_mode_var = tk.BooleanVar(value=bool(getattr(cfg, "async_mode", False)))
         self.max_crawl_depth_var = tk.IntVar(value=int(getattr(cfg, "max_crawl_depth", 2)))
         self.max_links_per_page_var = tk.IntVar(value=int(getattr(cfg, "max_links_per_page", 100)))
         self.user_agent_rotate_var = tk.BooleanVar(value=bool(getattr(cfg, "user_agent_rotate", True)))
@@ -251,6 +252,18 @@ class SettingsDialog:
         ttk.Label(c_frame, text="Oldalbetöltési timeout (mp):").grid(row=2, column=0, sticky=tk.W, pady=6)
         ttk.Spinbox(c_frame, from_=5, to=120, textvariable=self.timeout_get_var, width=6).grid(row=2, column=1, sticky=tk.W, pady=6, padx=6)
         ttk.Label(c_frame, text="(Maximum várakozás egy .onion oldal letöltésekor)", font=("TkDefaultFont", 7), foreground="#7f8c8d").grid(row=2, column=2, sticky=tk.W)
+
+        ttk.Checkbutton(
+            c_frame,
+            text="Aszinkron hálózati mód (kísérleti)",
+            variable=self.async_mode_var,
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=6)
+        ttk.Label(
+            c_frame,
+            text="(httpx/asyncio alapú magasabb párhuzamosság)",
+            font=("TkDefaultFont", 7),
+            foreground="#7f8c8d",
+        ).grid(row=3, column=2, sticky=tk.W)
 
         d_frame = ttk.LabelFrame(f, text="Crawler Mélység & Linkgyűjtés", padding=10)
         d_frame.pack(fill=tk.X, pady=6)
@@ -467,6 +480,7 @@ class SettingsDialog:
             export_default_format=self.export_default_format_var.get(),
             auto_tor_diagnostics_on_startup=self.auto_tor_diagnostics_var.get(),
             minimize_to_tray=self.minimize_to_tray_var.get(),
+            async_mode=self.async_mode_var.get(),
         )
 
     def apply_changes(self) -> bool:

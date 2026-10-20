@@ -63,5 +63,44 @@ def test_matches_precise_filter_title_and_regex():
         title_contains="forum",
         regex=r"[\w\.-]+@[\w\.-]+",
         min_len=10,
+        use_regex=True,
     )
     assert ok is True
+
+
+def test_matches_precise_filter_regex_injection_escaping():
+    # User types special characters like [test] or c++ or (a|b) without regex mode
+    ok, _ = matches_precise_filter(
+        title="C++ Forum",
+        text="Welcome to the c++ discussion board (special [tag])",
+        enabled=True,
+        must_all="c++, [tag]",
+        must_not="nonexistent(item)",
+        use_regex=False,
+    )
+    assert ok is True
+
+
+def test_matches_precise_filter_invalid_regex_and_redos_guard():
+    # Invalid regex syntax in regex mode
+    ok, reason = matches_precise_filter(
+        title="Test",
+        text="Sample text",
+        enabled=True,
+        must_all="[unclosed_bracket",
+        use_regex=True,
+    )
+    assert ok is False
+    assert "regex hiba" in reason
+
+    # Excessively long regex (>250 chars) ReDoS guard
+    long_pat = "a" * 260
+    ok, reason = matches_precise_filter(
+        title="Test",
+        text="Sample text",
+        enabled=True,
+        must_all=long_pat,
+        use_regex=True,
+    )
+    assert ok is False
+    assert "Túl hosszú regex" in reason

@@ -16,7 +16,7 @@ Main application window coordinating UI components, search lifecycle, persistenc
 Integrates standard logging, ConfigManager persistence, and constants configuration.
 Developed by HES Projects by FePe.
 """
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import json
@@ -56,6 +56,51 @@ from onion_search.storage.sqlite_backend import SQLiteBackend
 from onion_search.ui.filters import FilterPanel
 from onion_search.ui.log_panel import LogPanel, logger
 from onion_search.utils.helpers import fmt_ts, parse_list, normalize_onion_url
+
+
+class PerformanceMetrics:
+    """Tracks live response latencies and request rates over a rolling 15s window."""
+
+    def __init__(self, window_seconds: float = 15.0):
+        self.window_seconds = window_seconds
+        self.history = deque()  # stores (timestamp, latency_ms, status)
+        self.lock = threading.Lock()
+
+    def record_request(self, latency_ms: float, status: str) -> None:
+        now = time.time()
+        with self.lock:
+            self.history.append((now, latency_ms, status))
+            self._prune(now)
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.window_seconds
+        while self.history and self.history[0][0] < cutoff:
+            self.history.popleft()
+
+    def get_stats(self) -> Dict[str, Any]:
+        now = time.time()
+        with self.lock:
+            self._prune(now)
+            count = len(self.history)
+            if count == 0:
+                return {
+                    "req_per_sec": 0.0,
+                    "avg_latency_ms": 0.0,
+                    "count_in_window": 0,
+                }
+
+            total_latency = sum(item[1] for item in self.history)
+            avg_latency = total_latency / count
+            req_per_sec = count / self.window_seconds
+            return {
+                "req_per_sec": round(req_per_sec, 2),
+                "avg_latency_ms": round(avg_latency, 1),
+                "count_in_window": count,
+            }
+
+    def clear(self) -> None:
+        with self.lock:
+            self.history.clear()
 
 
 class MainWindow:
@@ -100,6 +145,7 @@ class MainWindow:
         self.running: bool = False
         self.lock: threading.Lock = threading.Lock()
         self.stats: Dict[str, int] = {"total": 0, "alive": 0, "clone": 0, "dead": 0, "filtered": 0}
+        self.perf_metrics = PerformanceMetrics(window_seconds=15.0)
 
         self.success_count: int = 0
         self.total_count: int = 0
@@ -129,6 +175,7 @@ class MainWindow:
         self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
         self.tor_tcp_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_tcp_timeout", 2.0))
         self.tor_socks_timeout_var = tk.DoubleVar(value=getattr(cfg, "tor_socks_timeout", 4.0))
+        self.async_mode_var = tk.BooleanVar(value=getattr(cfg, "async_mode", False))
         self.status_var = tk.StringVar(value="Készen - v5.0.0")
 
         # Build UI layout
@@ -409,6 +456,7 @@ class MainWindow:
                 normalize_to_host_only=self.host_only_var.get(),
                 tor_tcp_timeout=self.tor_tcp_timeout_var.get(),
                 tor_socks_timeout=self.tor_socks_timeout_var.get(),
+                async_mode=self.async_mode_var.get(),
             )
             self.config_manager.save(cfg)
         except Exception:
@@ -455,6 +503,7 @@ class MainWindow:
         )
         tools_menu.add_command(label="🌱 Maglista Frissítése", command=lambda: self.update_seeds_thread())
         tools_menu.add_command(label="🔄 NEWNYM kérése (Ctrl+N)", command=self.manual_newnym_thread)
+        tools_menu.add_command(label="⚡ Teljesítmény Teszt (Sync vs Async)...", command=self.open_benchmark_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🚨 Pánik törlés", command=self.panic_wipe)
         menubar.add_cascade(label="Eszközök", menu=tools_menu)
@@ -489,6 +538,12 @@ class MainWindow:
 
         self.root.config(menu=menubar)
 
+    def open_benchmark_dialog(self) -> None:
+        """Open comparative Sync vs Async performance benchmark dialog."""
+        from onion_search.ui.benchmark_dialog import PerformanceTestDialog
+        proxy_url = f"socks5h://127.0.0.1:{self.port_var.get()}"
+        PerformanceTestDialog(parent=self.root, fetcher=self.fetcher, proxy_url=proxy_url)
+
     def open_settings_dialog(self) -> None:
         """Open comprehensive tabbed settings dialog."""
         from onion_search.ui.settings_dialog import SettingsDialog
@@ -510,6 +565,7 @@ class MainWindow:
             self.host_only_var.set(new_cfg.normalize_to_host_only)
             self.tor_tcp_timeout_var.set(new_cfg.tor_tcp_timeout)
             self.tor_socks_timeout_var.set(new_cfg.tor_socks_timeout)
+            self.async_mode_var.set(new_cfg.async_mode)
             self.apply_theme()
 
         SettingsDialog(
@@ -897,7 +953,7 @@ class MainWindow:
         self.lbl_speed = ttk.Label(prog_frame, text="", font=("TkDefaultFont", 7))
         self.lbl_speed.pack(side=tk.LEFT)
 
-        # Status bar
+        # Status bar & Live Performance Monitor panel
         self.status_bar = tk.Frame(left, bg="#2c3e50", height=22)
         self.status_bar.pack(fill=tk.X, pady=2)
         self.lbl_statusbar = tk.Label(
@@ -908,7 +964,17 @@ class MainWindow:
             font=("TkDefaultFont", 8),
             anchor=tk.W,
         )
-        self.lbl_statusbar.pack(fill=tk.X, padx=6, pady=2)
+        self.lbl_statusbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=2)
+
+        self.lbl_perf_monitor = tk.Label(
+            self.status_bar,
+            text="⚡ Monitor: Készen",
+            bg="#2c3e50",
+            fg="#f1c40f",
+            font=("TkDefaultFont", 8, "bold"),
+            anchor=tk.E,
+        )
+        self.lbl_perf_monitor.pack(side=tk.RIGHT, padx=6, pady=2)
 
         # Log component
         self.log_panel = LogPanel(left)
@@ -2093,75 +2159,97 @@ class MainWindow:
     def update_seeds_thread(
         self, sources: Optional[List[str]] = None, silent: bool = False
     ) -> None:
-        """Fetch fresh seeds across multiple providers (Tor66, Deep Search, Ahmia, GitHub, OSE)."""
+        """Fetch fresh seeds across multiple providers non-blockingly without freezing Tkinter event loop."""
+        # Disable buttons on UI thread
+        try:
+            self.btn_seeds.config(state=tk.DISABLED)
+            self.btn_seeds_cfg.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
         def _run() -> None:
-            proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
-            allow_clearnet = self.allow_clearnet_var.get()
-            active_sources = sources or parse_list(
-                getattr(self.config_manager.config, "seed_sources", "tor66,deepsearch,ahmia,github,ose")
-            )
-            if not silent:
-                src_names = ", ".join([s.upper() for s in active_sources])
-                self.log_msg(
-                    f"[SEED] Maglista frissítés indítása ({src_names})...",
-                    force=True,
-                    tag="start",
+            try:
+                proxy = f"socks5h://127.0.0.1:{self.port_var.get()}"
+                allow_clearnet = self.allow_clearnet_var.get()
+                active_sources = sources or parse_list(
+                    getattr(self.config_manager.config, "seed_sources", "tor66,deepsearch,ahmia,github,ose")
                 )
-                self.set_statusbar_color("#2980b9", msg=f"Maglista letöltése ({src_names})...")
-
-            def _on_progress(src_name: str, count: int) -> None:
-                self.log_msg(f"[SEED] {src_name.upper()}: {count} cím találva", force=True, tag="info")
-
-            found, counts = self.fetcher.fetch_all_seeds(
-                proxy_url=proxy,
-                allow_clearnet=allow_clearnet,
-                selected_sources=active_sources,
-                on_source_progress=_on_progress,
-            )
-
-            if not found and not allow_clearnet and not proxy:
                 if not silent:
+                    src_names = ", ".join([s.upper() for s in active_sources])
                     self.log_msg(
-                        "[SECURITY] Maglista frissítés blokkolva: Tor proxy nem elérhető és Clearnet tiltva!",
+                        f"[SEED] Maglista frissítés indítása ({src_names})...",
                         force=True,
-                        tag="tor_err",
+                        tag="start",
                     )
-                    self.set_statusbar_color("#e67e22", msg="Maglista tiltva (Tor-only aktív)")
-                return
+                    self.set_statusbar_color("#2980b9", msg=f"Maglista letöltése ({src_names})...")
 
-            # Deduplicate against checked and dead sets
-            new_seeds = [
-                u for u in found
-                if (normalize_onion_url(u) or u) not in self.checked_urls and (normalize_onion_url(u) or u) not in self.dead_blacklist
-            ]
+                def _on_progress(src_name: str, count: int) -> None:
+                    self.log_msg(f"[SEED] {src_name.upper()}: {count} cím találva", force=True, tag="info")
 
-            def _update_ui() -> None:
-                try:
-                    if new_seeds:
-                        existing = self.extra_text.get("1.0", tk.END)
-                        existing_set = set(
-                            re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", existing)
-                        )
-                        to_add = [u for u in new_seeds if u not in existing_set]
-                        if to_add:
-                            self.extra_text.insert(tk.END, "\n".join(to_add[:600]) + "\n")
+                found, counts = self.fetcher.fetch_all_seeds(
+                    proxy_url=proxy,
+                    allow_clearnet=allow_clearnet,
+                    selected_sources=active_sources,
+                    on_source_progress=_on_progress,
+                )
+
+                if not found and not allow_clearnet and not proxy:
                     if not silent:
-                        detail = ", ".join([f"{k}: {v}" for k, v in counts.items()])
                         self.log_msg(
-                            f"[SEED] Sikeres frissítés! {len(found)} összes mag ({detail}), {len(new_seeds)} új cím hozzáadva.",
+                            "[SECURITY] Maglista frissítés blokkolva: Tor proxy nem elérhető és Clearnet tiltva!",
                             force=True,
-                            tag="save",
+                            tag="tor_err",
                         )
-                        self.set_statusbar_color(
-                            "#27ae60", msg=f"Maglista frissítve: {len(found)} cím"
-                        )
+                        self.set_statusbar_color("#e67e22", msg="Maglista tiltva (Tor-only aktív)")
+                    return
+
+                new_seeds = [
+                    u for u in found
+                    if (normalize_onion_url(u) or u) not in self.checked_urls and (normalize_onion_url(u) or u) not in self.dead_blacklist
+                ]
+
+                def _update_ui() -> None:
+                    try:
+                        if new_seeds:
+                            existing = self.extra_text.get("1.0", tk.END)
+                            existing_set = set(
+                                re.findall(r"https?://[a-z2-7]{16,56}\.onion[^\s]*", existing)
+                            )
+                            to_add = [u for u in new_seeds if u not in existing_set]
+                            if to_add:
+                                self.extra_text.insert(tk.END, "\n".join(to_add[:600]) + "\n")
+                        if not silent:
+                            detail = ", ".join([f"{k}: {v}" for k, v in counts.items()])
+                            self.log_msg(
+                                f"[SEED] Sikeres frissítés! {len(found)} összes mag ({detail}), {len(new_seeds)} új cím hozzáadva.",
+                                force=True,
+                                tag="save",
+                            )
+                            self.set_statusbar_color(
+                                "#27ae60", msg=f"Maglista frissítve: {len(found)} cím"
+                            )
+                    except Exception:
+                        pass
+
+                try:
+                    self.root.after(0, _update_ui)
                 except Exception:
                     pass
-
-            try:
-                self.root.after(0, _update_ui)
-            except Exception:
-                pass
+            except Exception as e:
+                err_msg = str(e)
+                self.log_msg(f"[SEED HIBA] Hiba történt a maglista frissítése során: {err_msg}", force=True, tag="error")
+                self.set_statusbar_color("#c0392b", msg=f"Maglista frissítési hiba: {err_msg[:40]}")
+            finally:
+                def _reenable_buttons() -> None:
+                    try:
+                        self.btn_seeds.config(state=tk.NORMAL)
+                        self.btn_seeds_cfg.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                try:
+                    self.root.after(0, _reenable_buttons)
+                except Exception:
+                    pass
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -2508,7 +2596,40 @@ class MainWindow:
             except Exception:
                 pass
 
-    def fetch_one(self, url: str, proxy_url: str) -> Dict[str, Any]:
+    def start_perf_monitor(self) -> None:
+        self.perf_metrics.clear()
+        self._update_perf_monitor()
+
+    def _update_perf_monitor(self) -> None:
+        if not self.running:
+            return
+
+        async_mode = getattr(self.config_manager.config, "async_mode", False) or self.async_mode_var.get()
+        mode_str = "Async" if async_mode else "Sync"
+        active_cnt = len(self.in_progress_urls)
+        max_workers = self.worker_var.get()
+        stats = self.perf_metrics.get_stats()
+
+        req_sec = stats["req_per_sec"]
+        avg_lat = stats["avg_latency_ms"]
+
+        alive = self.stats.get("alive", 0)
+        dead = self.stats.get("dead", 0)
+
+        perf_msg = (
+            f"⚡ [Mód: {mode_str}] Workers: {active_cnt}/{max_workers} | "
+            f"{req_sec} req/s | Átl. latency: {avg_lat:.0f} ms | Élő: {alive} | Halott: {dead}"
+        )
+
+        try:
+            self.lbl_perf_monitor.config(text=perf_msg)
+        except Exception:
+            pass
+
+        if self.running:
+            self.root.after(500, self._update_perf_monitor)
+
+    def fetch_one(self, url: str, proxy_url: str, async_mode: bool = False) -> Dict[str, Any]:
         now_ts = time.time()
         norm_input_url = normalize_onion_url(url) or url
 
@@ -2523,9 +2644,11 @@ class MainWindow:
                 }
             self.in_progress_urls.add(norm_input_url)
 
-        page = self.fetcher.fetch_page(
-            url, proxy_url, is_running_cb=lambda: self.running
+        page = self.fetcher.fetch_url(
+            url, proxy_url, is_running_cb=lambda: self.running, async_mode=async_mode
         )
+        latency_ms = (time.time() - now_ts) * 1000.0
+        self.perf_metrics.record_request(latency_ms, page.get("status", "unknown"))
         raw_url_to_save: str = page.get("url", url)
         norm_save_url: str = normalize_onion_url(raw_url_to_save) or raw_url_to_save
 
@@ -2587,6 +2710,175 @@ class MainWindow:
                 }
 
         # Deduplication check 1: O(1) set lookup in self.result_urls
+        with self.lock:
+            url_already_in_results = norm_save_url in self.result_urls
+
+        if url_already_in_results:
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return {
+                "url": norm_save_url,
+                "status": "clone",
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+
+        is_fp_duplicate, fp_orig = self.is_fp_seen(fp)
+        if is_fp_duplicate:
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return {
+                "url": norm_save_url,
+                "status": "clone",
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+
+        for b in btc:
+            is_btc_duplicate, _ = self.is_btc_seen(b)
+            if is_btc_duplicate:
+                with self.lock:
+                    self.in_progress_urls.discard(norm_input_url)
+                    if norm_save_url not in self.checked_urls:
+                        self.checked_urls.add(norm_save_url)
+                        if norm_save_url not in self.pending_checked:
+                            self.pending_checked.append(norm_save_url)
+                return {
+                    "url": norm_save_url,
+                    "status": "clone_btc",
+                    "ts": now_ts,
+                    "lang": lang,
+                    "category": category,
+                }
+
+        with self.lock:
+            self.in_progress_urls.discard(norm_input_url)
+            self._cache_fp(fp, norm_save_url)
+            self.pending_fp[fp] = norm_save_url
+            for b in btc:
+                self._cache_btc(b, norm_save_url)
+                self.pending_btc[b] = norm_save_url
+
+            result = {
+                "title": title,
+                "url": norm_save_url,
+                "snippet": snippet,
+                "fp": fp,
+                "ts": now_ts,
+                "lang": lang,
+                "category": category,
+            }
+            self.results.append(result)
+            self.result_urls.add(norm_save_url)
+            self.pending_results.append(result)
+            if norm_save_url not in self.checked_urls:
+                self.checked_urls.add(norm_save_url)
+            if norm_save_url not in self.pending_checked:
+                self.pending_checked.append(norm_save_url)
+
+        return {
+            "url": norm_save_url,
+            "status": "unique",
+            "title": title,
+            "snippet": snippet,
+            "fp": fp,
+            "ts": now_ts,
+            "lang": lang,
+            "category": category,
+        }
+
+    async def async_fetch_one(self, client: Any, url: str, proxy_url: str) -> Dict[str, Any]:
+        now_ts = time.time()
+        norm_input_url = normalize_onion_url(url) or url
+
+        with self.lock:
+            if norm_input_url in self.dead_blacklist or url in self.dead_blacklist:
+                return {
+                    "url": norm_input_url,
+                    "status": "dead_blacklisted",
+                    "ts": now_ts,
+                    "lang": "en",
+                    "category": "other",
+                }
+            self.in_progress_urls.add(norm_input_url)
+
+        page = await self.fetcher.async_fetch_page_httpx(
+            client, url, is_running_cb=lambda: self.running
+        )
+        latency_ms = (time.time() - now_ts) * 1000.0
+        self.perf_metrics.record_request(latency_ms, page.get("status", "unknown"))
+        raw_url_to_save: str = page.get("url", url)
+        norm_save_url: str = normalize_onion_url(raw_url_to_save) or raw_url_to_save
+
+        if page.get("status") == "canceled" or not self.running:
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+            return {"url": norm_save_url, "status": "canceled", "ts": now_ts}
+
+        if page.get("status") == "dead":
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                self.dead_blacklist[norm_save_url] = now_ts
+                self.pending_dead[norm_save_url] = now_ts
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return page
+
+        if page.get("status") == "empty":
+            with self.lock:
+                self.in_progress_urls.discard(norm_input_url)
+                if norm_save_url not in self.checked_urls:
+                    self.checked_urls.add(norm_save_url)
+                    if norm_save_url not in self.pending_checked:
+                        self.pending_checked.append(norm_save_url)
+            return page
+
+        fp: str = page.get("fp", "")
+        btc: List[str] = page.get("btc", [])
+        lang: str = page.get("lang", "en")
+        category: str = page.get("category", "other")
+        title: str = page.get("title", "")
+        text: str = page.get("text", "")
+        snippet: str = page.get("snippet", "")
+
+        if (
+            self.filters_panel.enable_precise_var.get()
+            and self.filters_panel.save_only_filtered_var.get()
+        ):
+            ok, reason = self.filters_panel.matches_precise(
+                title, text, lang, category
+            )
+            if not ok:
+                with self.lock:
+                    self.in_progress_urls.discard(norm_input_url)
+                    if norm_save_url not in self.checked_urls:
+                        self.checked_urls.add(norm_save_url)
+                        if norm_save_url not in self.pending_checked:
+                            self.pending_checked.append(norm_save_url)
+                    self.stats["filtered"] = self.stats.get("filtered", 0) + 1
+                return {
+                    "url": norm_save_url,
+                    "status": "filtered",
+                    "reason": reason,
+                    "ts": now_ts,
+                    "lang": lang,
+                    "category": category,
+                }
+
         with self.lock:
             url_already_in_results = norm_save_url in self.result_urls
 
@@ -2812,8 +3104,10 @@ class MainWindow:
                 if u not in norm_checked and u not in norm_dead
             ]
             all_onions_count = len(all_onions)
+            async_mode = getattr(self.config_manager.config, "async_mode", False) or self.async_mode_var.get()
+            mode_label = "Async [httpx]" if async_mode else "Sync [requests]"
             self.log_msg(
-                f"[START {backend}] {len(all_onions)} összes, "
+                f"[START {backend}] Mód: {mode_label} | {len(all_onions)} összes, "
                 f"{len(self.checked_urls)} ellenőrizve, {len(new_urls)} új, {workers} worker",
                 force=True,
                 tag="start",
@@ -2827,6 +3121,7 @@ class MainWindow:
         def _setup_ui():
             self.progress.config(maximum=total if total else 1, value=0)
             self.lbl_total.config(text=f"{all_onions_count}")
+            self.start_perf_monitor()
         self.root.after(0, _setup_ui)
 
         completed = 0
@@ -2905,49 +3200,111 @@ class MainWindow:
             if comp % 25 == 0 and auto_save:
                 self.save_incremental_pending()
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(self.fetch_one, url, proxy): url
-                for url in new_urls
-            }
-            for fut in as_completed(futures):
-                url_finished = futures.get(fut)
-                if not self.running:
-                    for f in futures:
-                        f.cancel()
-                    break
+        async_mode = getattr(self.config_manager.config, "async_mode", False) or self.async_mode_var.get()
+        use_fallback_sync = False
 
-                res = fut.result()
-                if res.get("status") == "canceled":
-                    continue
+        if async_mode:
+            try:
+                import httpx
 
-                completed += 1
-                with self.lock:
-                    if url_finished in self.pending_queue:
-                        self.pending_queue.remove(url_finished)
-                    ui_batch_items.append(res)
+                async def _async_search():
+                    nonlocal completed
+                    sem = asyncio.Semaphore(workers)
+                    transport_kwargs = {}
+                    if proxy:
+                        transport_kwargs["proxy"] = proxy
 
-                is_success = res["status"] in ("unique", "clone", "clone_btc")
-                with self.lock:
-                    if res["status"] == "unique":
-                        self.stats["alive"] = self.stats.get("alive", 0) + 1
-                    elif res["status"] in ("dead", "dead_blacklisted", "empty"):
-                        self.stats["dead"] = self.stats.get("dead", 0) + 1
-                    elif "clone" in res["status"]:
-                        self.stats["clone"] = self.stats.get("clone", 0) + 1
-                        self.stats["alive"] = self.stats.get("alive", 0) + 1
-                    elif res["status"] == "filtered":
-                        self.stats["filtered"] = (
-                            self.stats.get("filtered", 0) + 1
-                        )
+                    async with httpx.AsyncClient(timeout=TIMEOUT_GET, follow_redirects=True, **transport_kwargs) as client:
+                        async def _task(u):
+                            nonlocal completed
+                            if not self.running:
+                                return
+                            async with sem:
+                                res = await self.async_fetch_one(client, u, proxy)
+                                if res.get("status") == "canceled":
+                                    return
 
-                self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
+                                completed += 1
+                                with self.lock:
+                                    if u in self.pending_queue:
+                                        self.pending_queue.remove(u)
+                                    ui_batch_items.append(res)
 
-                now_t = time.time()
-                if completed % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or completed == total:
-                    self._last_ui_update_ts = now_t
-                    c_snap = completed
-                    self.root.after(0, lambda c=c_snap: _flush_ui(c))
+                                is_success = res["status"] in ("unique", "clone", "clone_btc")
+                                with self.lock:
+                                    if res["status"] == "unique":
+                                        self.stats["alive"] = self.stats.get("alive", 0) + 1
+                                    elif res["status"] in ("dead", "dead_blacklisted", "empty"):
+                                        self.stats["dead"] = self.stats.get("dead", 0) + 1
+                                    elif "clone" in res["status"]:
+                                        self.stats["clone"] = self.stats.get("clone", 0) + 1
+                                        self.stats["alive"] = self.stats.get("alive", 0) + 1
+                                    elif res["status"] == "filtered":
+                                        self.stats["filtered"] = self.stats.get("filtered", 0) + 1
+
+                                self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
+
+                                now_t = time.time()
+                                if completed % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or completed == total:
+                                    self._last_ui_update_ts = now_t
+                                    c_snap = completed
+                                    self.root.after(0, lambda c=c_snap: _flush_ui(c))
+
+                        tasks = [asyncio.create_task(_task(u)) for u in new_urls]
+                        if tasks:
+                            await asyncio.gather(*tasks, return_exceptions=True)
+
+                import asyncio
+                asyncio.run(_async_search())
+            except Exception as e:
+                self.log_msg(f"[ASYNC MODE HIBA] {e}. Visszaállás szinkron módra...", force=True, tag="error")
+                self.set_statusbar_color("#e67e22", msg="[!] Async hiba, visszaállás szinkron módra...")
+                use_fallback_sync = True
+
+        if not async_mode or use_fallback_sync:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(self.fetch_one, url, proxy, async_mode=False): url
+                    for url in new_urls
+                }
+                for fut in as_completed(futures):
+                    url_finished = futures.get(fut)
+                    if not self.running:
+                        for f in futures:
+                            f.cancel()
+                        break
+
+                    res = fut.result()
+                    if res.get("status") == "canceled":
+                        continue
+
+                    completed += 1
+                    with self.lock:
+                        if url_finished in self.pending_queue:
+                            self.pending_queue.remove(url_finished)
+                        ui_batch_items.append(res)
+
+                    is_success = res["status"] in ("unique", "clone", "clone_btc")
+                    with self.lock:
+                        if res["status"] == "unique":
+                            self.stats["alive"] = self.stats.get("alive", 0) + 1
+                        elif res["status"] in ("dead", "dead_blacklisted", "empty"):
+                            self.stats["dead"] = self.stats.get("dead", 0) + 1
+                        elif "clone" in res["status"]:
+                            self.stats["clone"] = self.stats.get("clone", 0) + 1
+                            self.stats["alive"] = self.stats.get("alive", 0) + 1
+                        elif res["status"] == "filtered":
+                            self.stats["filtered"] = (
+                                self.stats.get("filtered", 0) + 1
+                            )
+
+                    self.check_auto_newnym(is_success=is_success, auto_newnym_success=auto_newnym_success, auto_newnym_total=auto_newnym_total)
+
+                    now_t = time.time()
+                    if completed % 5 == 0 or (now_t - getattr(self, "_last_ui_update_ts", 0) >= 0.3) or completed == total:
+                        self._last_ui_update_ts = now_t
+                        c_snap = completed
+                        self.root.after(0, lambda c=c_snap: _flush_ui(c))
 
         with self.lock:
             self.in_progress_urls.clear()

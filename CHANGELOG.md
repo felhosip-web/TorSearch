@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.0.1] - 2026-10-20
+
+### Biztonság
+- **Tor-only kikényszerítés és központi net_guard**
+  - Új `onion_search/utils/net_guard.py` modul szigorú `socks5h://` ellenőrzéssel a DNS-szivárgások teljes megelőzésére.
+  - Szigorú `TorOnlyViolation` kivétel dobása és `[SECURITY]` naplózás szanitizált (query paraméterek nélküli) URL-ekkel, amennyiben proxy hiányában clearnet kérés indulna.
+  - Az összes HTTP hálózati kérés (`search_onionsearchengine`, `search_ahmia`, `fetch_github_seeds`, `RobotsChecker`, `fetch_page`, `fetch_url`, seed pluginok) átirányítása a központi guardon keresztül.
+  - SOCKS5h séma kötelezővé tétele sima `socks5://` helyett.
+  - Maximális válaszméret korlátozás (`MAX_RESPONSE_BYTES = 2MB`) streamelt és darabolt beolvasással (`too_large` hiba státusz).
+  - Nem `.onion` átirányítások (redirect) blokkolása `allow_clearnet = False` mellett (`filtered` státusszal).
+  - Új `tests/test_tor_guard.py` tesztkészlet és statikus AST forráskód ellenőrzés a kimenő kérések központi védelmének igazolására.
+
 ## [5.0.0] - 2026-10-20
 
 ### Hozzáadva

@@ -24,6 +24,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import tkinter as tk
+from onion_search.config import ConfigManager
 from onion_search.core.detector import ContentDetector
 from onion_search.core.fetcher import OnionFetcher, SessionManager
 from onion_search.core.neonym import TorController
@@ -44,7 +45,8 @@ def create_app(root=None):
     # 2. Initialize domain core components
     detector = ContentDetector()
     session_manager = SessionManager()
-    fetcher = OnionFetcher(session_manager=session_manager, detector=detector)
+    cfg = ConfigManager().config
+    fetcher = OnionFetcher(session_manager=session_manager, detector=detector, allow_clearnet=cfg.allow_clearnet)
     tor_controller = TorController(on_sessions_reset=session_manager.close_all)
 
     # 3. Wire components into the UI main window

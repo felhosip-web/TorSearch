@@ -3086,7 +3086,10 @@ class MainWindow:
                 self.log_msg(f"[SEARCH] Ahmia találatok száma ({len(all_onions)}) >= 30, OnionSearchEngine kihagyva.", force=True, tag="info")
             else:
                 ose_onions = self.fetcher.search_onionsearchengine(
-                    queries, is_running_cb=lambda: self.running
+                    queries,
+                    proxy_url=proxy,
+                    allow_clearnet=self.allow_clearnet_var.get(),
+                    is_running_cb=lambda: self.running,
                 )
                 for u in ose_onions:
                     norm = normalize_onion_url(u)

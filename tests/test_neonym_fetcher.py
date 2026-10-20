@@ -43,29 +43,27 @@ def test_robots_checker_disabled():
     assert checker.is_allowed("http://example.onion/private", sess=None) is True
 
 def test_onion_fetcher_retry_logic():
-    mock_session = MagicMock()
     # First response fails with 503, second response succeeds with 200
     resp_503 = MagicMock()
     resp_503.status_code = 503
     resp_503.text = "Service Unavailable"
     resp_503.url = "http://test.onion"
+    resp_503.headers = {}
 
     resp_200 = MagicMock()
     resp_200.status_code = 200
     resp_200.text = "<html><head><title>Success</title></head><body>" + ("content " * 50) + "</body></html>"
     resp_200.url = "http://test.onion"
+    resp_200.headers = {}
+    resp_200.iter_content.return_value = [resp_200.text.encode("utf-8")]
 
-    mock_session.get.side_effect = [resp_503, resp_200]
+    with patch("requests.get", side_effect=[resp_503, resp_200]) as mock_get:
+        fetcher = OnionFetcher(max_retries=2, domain_delay=0.0)
+        res = fetcher.fetch_page("http://test.onion", "socks5h://127.0.0.1:9050")
 
-    mock_mgr = MagicMock()
-    mock_mgr.get_session.return_value = mock_session
-
-    fetcher = OnionFetcher(session_manager=mock_mgr, max_retries=2, domain_delay=0.0)
-    res = fetcher.fetch_page("http://test.onion", "socks5h://127.0.0.1:9050")
-
-    assert res["status"] == "ok"
-    assert res["title"] == "Success"
-    assert mock_session.get.call_count == 2
+        assert res["status"] == "ok"
+        assert res["title"] == "Success"
+        assert mock_get.call_count == 2
 
 
 def test_probe_tor_socks_port_refused():

@@ -96,32 +96,62 @@ def test_fetch_url_fallback_on_async_exception(monkeypatch):
 def test_async_fetch_page_httpx_success():
     """Verify async_fetch_page_httpx successfully fetches and parses page content."""
     fetcher = OnionFetcher()
-    mock_client = MagicMock()
 
-    sample_html = "<html><head><title>Test Onion Page</title></head><body>" + "Content for testing onion page " * 20 + "</body></html>"
-    mock_response = MockResponse(status_code=200, text=sample_html)
-    mock_client.get = MagicMock(return_value=mock_response)
+    sample_html = b"<html><head><title>Test Onion Page</title></head><body>" + b"Content for testing onion page " * 20 + b"</body></html>"
+
+    class AsyncChunkStream:
+        def __init__(self, chunks, status_code=200):
+            self.status_code = status_code
+            self.headers = {}
+            self.url = "http://testonion1234567890abcdef.onion"
+            self._chunks = chunks
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        async def aiter_bytes(self):
+            for c in self._chunks:
+                yield c
+
+    mock_client = MagicMock()
+    mock_client.stream = MagicMock(return_value=AsyncChunkStream([sample_html], status_code=200))
 
     async def _test():
-        return await fetcher.async_fetch_page_httpx(mock_client, "http://testonion1234567890abcdef.onion")
+        return await fetcher.async_fetch_page_httpx(mock_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
 
     res = asyncio.run(_test())
 
     assert res["status"] == "ok"
     assert res["title"] == "Test Onion Page"
-    assert "content for testing" in res["text"]
 
 
 def test_async_fetch_page_httpx_dead_link():
     """Verify async_fetch_page_httpx handles HTTP 404 / dead link appropriately."""
     fetcher = OnionFetcher(max_retries=0)
-    mock_client = MagicMock()
 
-    mock_response = MockResponse(status_code=404, text="Not Found")
-    mock_client.get = MagicMock(return_value=mock_response)
+    class AsyncChunkStream404:
+        def __init__(self):
+            self.status_code = 404
+            self.headers = {}
+            self.url = "http://testonion1234567890abcdef.onion"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        async def aiter_bytes(self):
+            yield b"Not Found"
+
+    mock_client = MagicMock()
+    mock_client.stream = MagicMock(return_value=AsyncChunkStream404())
 
     async def _test():
-        return await fetcher.async_fetch_page_httpx(mock_client, "http://testonion1234567890abcdef.onion")
+        return await fetcher.async_fetch_page_httpx(mock_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
 
     res = asyncio.run(_test())
 

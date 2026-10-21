@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
-from onion_search.utils.helpers import HEADERS_LIST, normalize_onion_url
+from onion_search.utils.helpers import HEADERS_LIST, get_request_headers, normalize_onion_url
 from onion_search.utils.net_guard import TorOnlyViolation, guarded_request
 
 logger = logging.getLogger("onion_search")
@@ -101,7 +101,7 @@ class BaseSeedPlugin(ABC):
             if self.user_agent:
                 req_headers["User-Agent"] = self.user_agent
             else:
-                req_headers.update(random.choice(HEADERS_LIST))
+                req_headers.update(get_request_headers(rotate=False))
 
         for attempt in range(self.max_retries + 1):
             try:

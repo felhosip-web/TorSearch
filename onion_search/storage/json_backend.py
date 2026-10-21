@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from onion_search.storage.base import BaseStorage
 from onion_search.storage.crypto import StorageEncryptor
-from onion_search.utils.helpers import DEAD_FILE, STATE_FILE
+from onion_search.utils.helpers import DEAD_FILE, STATE_FILE, secure_write_text
 
 
 class JSONBackend(BaseStorage):
@@ -130,12 +130,10 @@ class JSONBackend(BaseStorage):
     def save(self, data: Dict[str, Any], incremental: bool = False) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         if self.encrypt_storage and self.encryptor:
-            encrypted_data = self.encryptor.encrypt_json(data)
-            with open(self.state_file, "wb") as f:
-                f.write(encrypted_data)
+            encrypted_bytes = self.encryptor.encrypt_json(data)
+            secure_write_text(self.state_file, encrypted_bytes.decode("latin1"), encoding="latin1")
         else:
-            with open(self.state_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            secure_write_text(self.state_file, json.dumps(data, ensure_ascii=False, indent=2))
 
     def save_pending(self, pending: Dict[str, Any]) -> bool:
         return False
@@ -162,12 +160,10 @@ class JSONBackend(BaseStorage):
         try:
             self.dead_file.parent.mkdir(parents=True, exist_ok=True)
             if self.encrypt_storage and self.encryptor:
-                encrypted = self.encryptor.encrypt_json(dead_dict)
-                with open(self.dead_file, "wb") as f:
-                    f.write(encrypted)
+                encrypted_bytes = self.encryptor.encrypt_json(dead_dict)
+                secure_write_text(self.dead_file, encrypted_bytes.decode("latin1"), encoding="latin1")
             else:
-                with open(self.dead_file, "w", encoding="utf-8") as f:
-                    json.dump(dead_dict, f)
+                secure_write_text(self.dead_file, json.dumps(dead_dict))
         except Exception:
             pass
 

@@ -76,7 +76,7 @@ class SettingsDialog:
         self.async_mode_var = tk.BooleanVar(value=bool(getattr(cfg, "async_mode", False)))
         self.max_crawl_depth_var = tk.IntVar(value=int(getattr(cfg, "max_crawl_depth", 2)))
         self.max_links_per_page_var = tk.IntVar(value=int(getattr(cfg, "max_links_per_page", 100)))
-        self.user_agent_rotate_var = tk.BooleanVar(value=bool(getattr(cfg, "user_agent_rotate", True)))
+        self.user_agent_rotate_var = tk.BooleanVar(value=bool(getattr(cfg, "user_agent_rotate", False)))
 
         # Tab 3: Filtering & Content
         self.default_language_var = tk.StringVar(value=str(getattr(cfg, "default_language", "all")))

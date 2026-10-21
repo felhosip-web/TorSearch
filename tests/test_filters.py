@@ -81,6 +81,25 @@ def test_matches_precise_filter_regex_injection_escaping():
     assert ok is True
 
 
+def test_matches_precise_filter_redos_execution_timeout():
+    import time
+    # (a+)+$ pattern on long 'a' string with trailing '!'
+    redos_pattern = "(a+)+$"
+    test_text = "a" * 35 + "!"
+
+    start_t = time.time()
+    ok, reason = matches_precise_filter(
+        title="Test",
+        text=test_text,
+        enabled=True,
+        regex=redos_pattern,
+        use_regex=True,
+    )
+    elapsed = time.time() - start_t
+    assert elapsed < 1.0
+    assert ok is False
+
+
 def test_matches_precise_filter_invalid_regex_and_redos_guard():
     # Invalid regex syntax in regex mode
     ok, reason = matches_precise_filter(

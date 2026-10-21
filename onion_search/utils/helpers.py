@@ -29,10 +29,32 @@ from onion_search.config import (
     STATE_DIR,
 )
 
+import random
+
+# Fix Firefox ESR / Windows 10 Tor Browser profile headers
+# Megjegyzés: Időnként frissítendő a legfrissebb Tor Browser ESR verzió szerint.
+TOR_BROWSER_UA: Dict[str, str] = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+}
+
 HEADERS_LIST: List[Dict[str, str]] = [
     {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"},
     {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"},
 ]
+
+
+def get_request_headers(rotate: bool = False) -> Dict[str, str]:
+    """
+    Return standard request headers.
+    If rotate is True, selects a random header set from HEADERS_LIST.
+    If rotate is False, returns the uniform TOR_BROWSER_UA profile.
+    """
+    if rotate:
+        return dict(random.choice(HEADERS_LIST))
+    return dict(TOR_BROWSER_UA)
 TIMEOUT_GET: int = DEFAULT_TIMEOUT_GET
 STATE_FILE: Path = DEFAULT_STATE_FILE
 DEAD_FILE: Path = DEFAULT_DEAD_FILE
@@ -115,6 +137,50 @@ def fmt_ts(ts: Optional[Union[float, int, str]]) -> str:
         return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return ""
+
+
+import os
+
+def ensure_private_dir(path: Union[str, Path]) -> None:
+    """Ensure directory exists with 0o700 permissions."""
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(p, 0o700)
+    except Exception:
+        pass
+
+
+def secure_write_text(path: Union[str, Path], text: str, encoding: str = "utf-8") -> None:
+    """Write text to file securely using atomic creation/truncation with 0o600 permissions."""
+    p = Path(path)
+    ensure_private_dir(p.parent)
+    data = text.encode(encoding)
+
+    # Write atomically via temp file with O_CREAT|O_WRONLY|O_TRUNC and 0o600 mode
+    tmp_path = p.with_suffix(f"{p.suffix}.tmp.{os.getpid()}")
+    try:
+        fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp_path, 0o600)
+        except Exception:
+            pass
+        os.replace(tmp_path, p)
+        try:
+            os.chmod(p, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+        raise
 
 
 def parse_list(s: Optional[str]) -> List[str]:

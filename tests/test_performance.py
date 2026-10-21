@@ -52,18 +52,25 @@ def test_database_indexes_created():
 
 def test_async_fetch_page_with_lxml_and_cache():
     import asyncio
+    from tests.fakes import FakeAsyncClient, FakeStreamResponse
+
     async def _run():
-        mock_client = AsyncMock()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = "<html><head><title>Async Onion</title></head><body>" + ("content word " * 60) + "</body></html>"
-        mock_resp.url = "http://asyncsite.onion"
-        mock_client.get.return_value = mock_resp
+        content = (
+            b"<html><head><title>Async Onion</title></head><body>"
+            + b"content word " * 60
+            + b"</body></html>"
+        )
+        fake_resp = FakeStreamResponse(
+            status_code=200,
+            content_chunks=[content],
+            url="http://asyncsite1234567890abcdef.onion",
+        )
+        fake_client = FakeAsyncClient([fake_resp])
 
         detector = ContentDetector()
         fetcher = OnionFetcher(detector=detector)
 
-        res = await fetcher.async_fetch_page(mock_client, "http://asyncsite.onion")
+        res = await fetcher.async_fetch_page_httpx(fake_client, "http://asyncsite1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
         assert res["status"] == "ok"
         assert res["title"] == "Async Onion"
         assert res["fp"] is not None

@@ -69,7 +69,7 @@ DEFAULT_TOTAL_THRESHOLD: int = 100
 # Crawler & Content Defaults
 DEFAULT_MAX_CRAWL_DEPTH: int = 2
 DEFAULT_MAX_LINKS_PER_PAGE: int = 100
-DEFAULT_USER_AGENT_ROTATE: bool = True
+DEFAULT_USER_AGENT_ROTATE: bool = False
 DEFAULT_LANGUAGE_FILTER: str = "all"
 DEFAULT_CATEGORY_FILTER: str = "all"
 DEFAULT_FINGERPRINT_SENSITIVITY: str = "medium"
@@ -156,13 +156,13 @@ class ConfigManager:
         return AppConfig()
 
     def save(self, config: AppConfig = None) -> bool:
-        """Save configuration settings to JSON file."""
+        """Save configuration settings to JSON file atomically with secure permissions."""
         if config is not None:
             self.config = config
         try:
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_file, "w", encoding="utf-8") as f:
-                json.dump(self.config.to_dict(), f, indent=2, ensure_ascii=False)
+            from onion_search.utils.helpers import secure_write_text
+            content = json.dumps(self.config.to_dict(), indent=2, ensure_ascii=False)
+            secure_write_text(self.config_file, content)
             return True
         except Exception as e:
             logging.getLogger("onion_search").error(f"Config mentési hiba: {e}")

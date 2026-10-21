@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.0.2] - 2026-10-21
+
+### Biztonság (2. fázis)
+- **Pánikgomb billentyűkötés tisztítása**: A szövegmezős gépelést zavaró `Ctrl+Delete` és `Ctrl+KP_Delete` kötés törlése, megőrizve a `Ctrl+Shift+Delete`, `Ctrl+Shift+KP_Delete` és `Ctrl+Shift+BackSpace` parancsokat.
+- **Szigorú kulcsfájl jogosultságkezelés**: Titkosítási kulcsfájl létrehozása atomi `O_CREAT | O_EXCL | O_WRONLY` móddal `0o600` jogosultsággal, a szülő mappa `0o700` védelmével és a létező fájlok automatikus felülvizsgálatával/szigorításával POSIX rendszereken.
+- **Erős jelszó alapú kulcsszármaztatás**: PBKDF2HMAC(SHA256, length=32, iterations=600_000) alkalmazása 16 bájtos véletlen sóval (`.storage.salt`, `0o600`), visszafelé kompatibilis SHA-256 dekódolási ággal és figyelmeztetéssel.
+- **Konfigurációs és adatbázisfájlok védelme**: Közös `secure_write_text` és `ensure_private_dir` segédfüggvények használata a `config.json`, SQLite (`onion.db`) és JSON állapotfájlok atomi `0o600` jogosultságú mentéséhez.
+- **Tor cookie keresés optimalizálása**: A lassú, teljes home mappát bejáró rekurzív `rglob` eltávolítása, helyette fix útvonalak, célzott glob minták és a `TOR_CONTROL_COOKIE` környezeti változó támogatása.
+- **Tor Browser User-Agent profil**: User-Agent rotáció kikapcsolása alapértelmezésben (`DEFAULT_USER_AGENT_ROTATE = False`), egységes Tor Browser ESR profil (`TOR_BROWSER_UA`) használata és szálbiztos dinamikus frissítés.
+- **ReDoS elleni védelem és LIKE escape**: ReDoS-védelem a regex szűrőben (`regex` csomag 0.5s timeout / stdlib heurisztika) 200k karakteres korláttal, valamint az SQLite `LIKE` kifejezések speciális karaktereinek (`\`, `%`, `_`) biztonságos escape-elése.
+- **Archaikus async kód és aiohttp eltávolítása**: A régi, 1. fázisból maradt `async_fetch_page` törlése a `fetcher.py`-ból és az aiohttp függőség teljes kivezetése a tesztek igazításával.
+
 ## [5.0.1] - 2026-10-20
 
 ### Biztonság

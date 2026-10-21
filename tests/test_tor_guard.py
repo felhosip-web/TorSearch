@@ -22,6 +22,7 @@ import pytest
 
 from onion_search.config import MAX_RESPONSE_BYTES
 from onion_search.core.fetcher import OnionFetcher
+from onion_search.utils.helpers import is_onion_host
 from onion_search.utils.net_guard import TorOnlyViolation, guarded_get, is_proxy_allowed
 
 
@@ -148,3 +149,67 @@ def test_static_source_code_guard_compliance():
                         violations.append(f"{py_file.relative_to(repo_root)}:{node.lineno} -> direct requests.{func.attr}() call")
 
     assert not violations, f"Found direct requests call outside net_guard.py: {violations}"
+
+
+def test_onion_fetcher_dynamic_set_allow_clearnet():
+    """Verify set_allow_clearnet dynamically toggles fetcher network permission."""
+    fetcher = OnionFetcher(allow_clearnet=True)
+    fetcher.set_allow_clearnet(False)
+
+    with patch("requests.get") as mock_req:
+        res = fetcher.fetch_page("http://example.com/test", proxy_url=None)
+        assert res["status"] == "filtered"
+        mock_req.assert_not_called()
+
+        res_url = fetcher.fetch_url("http://example.com/test", proxy_url=None, async_mode=False)
+        assert res_url["status"] == "filtered"
+        mock_req.assert_not_called()
+
+    # Toggle back to True
+    fetcher.set_allow_clearnet(True)
+    mock_resp = DummyStreamResponse(status_code=200)
+    with patch("requests.get", return_value=mock_resp) as mock_req:
+        res = fetcher.fetch_page("http://example.com/test", proxy_url=None)
+        assert res["status"] == "ok"
+        mock_req.assert_called()
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("http://valami.onion.example.com/", False),
+        ("http://abc123def456ghi789jkl123mno456pqr789stu123vwx456yz123456.onion/page2", True),
+        ("//evil.com/x", False),
+        ("http://EXAMPLE.ONION/", True),
+        ("http://x.onion.evil.com", False),
+        ("", False),
+    ],
+)
+def test_is_onion_host(url, expected):
+    """Verify is_onion_host strictly validates onion domains."""
+    assert is_onion_host(url) is expected
+
+
+def test_redirects_validation():
+    """Verify redirect safety logic handling for subdomains, relative URLs, and scheme-relative URLs."""
+    fetcher = OnionFetcher(allow_clearnet=False)
+
+    # a) http://valami.onion.example.com/ redirect -> filtered
+    r1 = DummyStreamResponse(status_code=302, headers={"Location": "http://valami.onion.example.com/"})
+    with patch("requests.get", return_value=r1):
+        res1 = fetcher.fetch_page("http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
+        assert res1["status"] == "filtered"
+
+    # b) http://abc...xyz.onion/page2 relative redirect -> followed
+    onion_url = "http://abc123def456ghi789jkl123mno456pqr789stu123vwx456yz123456.onion"
+    r2_redirect = DummyStreamResponse(status_code=302, headers={"Location": "page2"})
+    r2_ok = DummyStreamResponse(status_code=200)
+    with patch("requests.get", side_effect=[r2_redirect, r2_ok]):
+        res2 = fetcher.fetch_page(onion_url, proxy_url="socks5h://127.0.0.1:9050")
+        assert res2["status"] == "ok"
+
+    # c) //evil.com/x scheme-relative redirect -> filtered
+    r3 = DummyStreamResponse(status_code=302, headers={"Location": "//evil.com/x"})
+    with patch("requests.get", return_value=r3):
+        res3 = fetcher.fetch_page("http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
+        assert res3["status"] == "filtered"

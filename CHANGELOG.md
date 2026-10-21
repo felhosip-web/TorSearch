@@ -11,6 +11,8 @@
   - Maximális válaszméret korlátozás (`MAX_RESPONSE_BYTES = 2MB`) streamelt és darabolt beolvasással (`too_large` hiba státusz).
   - Nem `.onion` átirányítások (redirect) blokkolása `allow_clearnet = False` mellett (`filtered` státusszal).
   - Új `tests/test_tor_guard.py` tesztkészlet és statikus AST forráskód ellenőrzés a kimenő kérések központi védelmének igazolására.
+  - Dinamikus `allow_clearnet` szinkronizáció a felületről az `OnionFetcher`-be szálbiztos `set_allow_clearnet` metódussal és nyomon követéssel.
+  - Szigorú `is_onion_host` domain ellenőrzés és URL feloldás (`urljoin`) a hamis `.onion` aldomainek (pl. `onion.example.com`) és relatív átirányítások biztonságos szűrésére.
 
 ## [5.0.0] - 2026-10-20
 

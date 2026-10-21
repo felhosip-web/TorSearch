@@ -26,6 +26,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse
+import urllib.parse
 import urllib.robotparser
 from bs4 import BeautifulSoup
 import aiohttp
@@ -40,7 +41,7 @@ from onion_search.core.detector import (
 )
 from onion_search.config import MAX_RESPONSE_BYTES
 from onion_search.core.seeds import SeedManager
-from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET, normalize_onion_url
+from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET, is_onion_host, normalize_onion_url
 from onion_search.utils.net_guard import (
     TorOnlyViolation,
     guarded_get,
@@ -213,6 +214,7 @@ class OnionFetcher:
         seed_manager=None,
         allow_clearnet=False,
     ):
+        self._lock = threading.Lock()
         self.session_manager = session_manager or SessionManager()
         self.detector = detector or ContentDetector()
         self.max_retries = max_retries
@@ -220,6 +222,12 @@ class OnionFetcher:
         self.robots_checker = RobotsChecker(enabled=respect_robots)
         self.seed_manager = seed_manager or SeedManager()
         self.allow_clearnet = allow_clearnet
+
+    def set_allow_clearnet(self, value: bool) -> None:
+        """Thread-safely update allow_clearnet setting and log security event."""
+        with self._lock:
+            self.allow_clearnet = bool(value)
+        logging.getLogger("onion_search").info(f"[SECURITY] allow_clearnet -> {bool(value)}")
 
     def fetch_tor66_seeds(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
@@ -434,10 +442,13 @@ class OnionFetcher:
         """
         Synchronous fetch with domain rate limiting, retry logic, and lxml parsing.
         """
+        with self._lock:
+            allow_clearnet = self.allow_clearnet
+
         now_ts = time.time()
         domain = urlparse(url).netloc
 
-        if not is_proxy_allowed(proxy_url, self.allow_clearnet):
+        if not is_proxy_allowed(proxy_url, allow_clearnet):
             return {
                 "url": url,
                 "status": "filtered",
@@ -448,7 +459,7 @@ class OnionFetcher:
             }
 
         if not self.robots_checker.is_allowed(
-            url, proxy_url=proxy_url, allow_clearnet=self.allow_clearnet
+            url, proxy_url=proxy_url, allow_clearnet=allow_clearnet
         ):
             return {
                 "url": url,
@@ -487,7 +498,7 @@ class OnionFetcher:
                     r = guarded_get(
                         cur_url,
                         proxy_url=proxy_url,
-                        allow_clearnet=self.allow_clearnet,
+                        allow_clearnet=allow_clearnet,
                         timeout=TIMEOUT_GET,
                         allow_redirects=False,
                         headers=headers,
@@ -495,12 +506,10 @@ class OnionFetcher:
                     )
 
                     if r.status_code in (301, 302, 303, 307, 308) and "Location" in r.headers:
-                        next_url = r.headers["Location"]
-                        if next_url.startswith("/"):
-                            parsed_cur = urlparse(cur_url)
-                            next_url = f"{parsed_cur.scheme}://{parsed_cur.netloc}{next_url}"
+                        raw_loc = r.headers["Location"]
+                        next_url = urllib.parse.urljoin(cur_url, raw_loc)
 
-                        if not self.allow_clearnet and ".onion" not in urlparse(next_url).netloc:
+                        if not allow_clearnet and not is_onion_host(next_url):
                             r.close()
                             return {
                                 "url": next_url,
@@ -533,7 +542,7 @@ class OnionFetcher:
                         continue
 
                     return {
-                        "url": final_url if ".onion" in final_url else url,
+                        "url": final_url if is_onion_host(final_url) else url,
                         "status": "dead",
                         "code": r.status_code,
                         "ts": now_ts,
@@ -555,7 +564,7 @@ class OnionFetcher:
 
                 if too_large:
                     return {
-                        "url": final_url if ".onion" in final_url else url,
+                        "url": final_url if is_onion_host(final_url) else url,
                         "status": "dead",
                         "err": "too_large",
                         "ts": now_ts,
@@ -566,7 +575,7 @@ class OnionFetcher:
                 raw_bytes = b"".join(chunks)
                 if len(raw_bytes) < 300:
                     return {
-                        "url": final_url if ".onion" in final_url else url,
+                        "url": final_url if is_onion_host(final_url) else url,
                         "status": "dead",
                         "code": r.status_code,
                         "ts": now_ts,
@@ -620,7 +629,7 @@ class OnionFetcher:
                 "category": "other",
             }
 
-        url_to_save = final_url if ".onion" in final_url else url
+        url_to_save = final_url if is_onion_host(final_url) else url
         return self.parse_html_content(html, url_to_save, url, now_ts)
 
     async def async_fetch_page_httpx(self, client, url, is_running_cb=None, proxy_url=None):
@@ -628,10 +637,13 @@ class OnionFetcher:
         Asynchronous fetch using httpx.AsyncClient with SOCKS5h Tor proxy support,
         retry logic, rate limiting, and lxml HTML parsing.
         """
+        with self._lock:
+            allow_clearnet = self.allow_clearnet
+
         now_ts = time.time()
         domain = urlparse(url).netloc
 
-        if not is_proxy_allowed(proxy_url, self.allow_clearnet):
+        if not is_proxy_allowed(proxy_url, allow_clearnet):
             return {
                 "url": url,
                 "status": "filtered",
@@ -642,7 +654,7 @@ class OnionFetcher:
             }
 
         if not self.robots_checker.is_allowed(
-            url, None, proxy_url=proxy_url, allow_clearnet=self.allow_clearnet
+            url, None, proxy_url=proxy_url, allow_clearnet=allow_clearnet
         ):
             return {
                 "url": url,
@@ -683,12 +695,10 @@ class OnionFetcher:
                         async with stream_cm as r:
                             last_code = getattr(r, "status_code", 200)
                             if last_code in (301, 302, 303, 307, 308) and "location" in r.headers:
-                                next_url = r.headers["location"]
-                                if next_url.startswith("/"):
-                                    parsed_cur = urlparse(cur_url)
-                                    next_url = f"{parsed_cur.scheme}://{parsed_cur.netloc}{next_url}"
+                                raw_loc = r.headers["location"]
+                                next_url = urllib.parse.urljoin(cur_url, raw_loc)
 
-                                if not self.allow_clearnet and ".onion" not in urlparse(next_url).netloc:
+                                if not allow_clearnet and not is_onion_host(next_url):
                                     return {
                                         "url": next_url,
                                         "status": "filtered",
@@ -707,7 +717,7 @@ class OnionFetcher:
 
                             if last_code != 200:
                                 return {
-                                    "url": final_url if ".onion" in final_url else url,
+                                    "url": final_url if is_onion_host(final_url) else url,
                                     "status": "dead",
                                     "code": last_code,
                                     "ts": now_ts,
@@ -726,7 +736,7 @@ class OnionFetcher:
 
                             if too_large:
                                 return {
-                                    "url": final_url if ".onion" in final_url else url,
+                                    "url": final_url if is_onion_host(final_url) else url,
                                     "status": "dead",
                                     "err": "too_large",
                                     "ts": now_ts,
@@ -737,7 +747,7 @@ class OnionFetcher:
                             raw_bytes = b"".join(chunks)
                             if len(raw_bytes) < 300:
                                 return {
-                                    "url": final_url if ".onion" in final_url else url,
+                                    "url": final_url if is_onion_host(final_url) else url,
                                     "status": "dead",
                                     "code": last_code,
                                     "ts": now_ts,
@@ -765,7 +775,7 @@ class OnionFetcher:
 
                         if len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
                             return {
-                                "url": final_url if ".onion" in final_url else url,
+                                "url": final_url if is_onion_host(final_url) else url,
                                 "status": "dead",
                                 "err": "too_large",
                                 "ts": now_ts,
@@ -778,7 +788,7 @@ class OnionFetcher:
 
                         if last_code != 200 or len(text) < 300:
                             return {
-                                "url": final_url if ".onion" in final_url else url,
+                                "url": final_url if is_onion_host(final_url) else url,
                                 "status": "dead",
                                 "code": last_code,
                                 "ts": now_ts,
@@ -818,7 +828,7 @@ class OnionFetcher:
                 "category": "other",
             }
 
-        url_to_save = final_url if ".onion" in final_url else url
+        url_to_save = final_url if is_onion_host(final_url) else url
         return self.parse_html_content(html, url_to_save, url, now_ts)
 
     def fetch_url(
@@ -833,7 +843,10 @@ class OnionFetcher:
         Uses synchronous requests if async_mode is False.
         Uses httpx/asyncio if async_mode is True, falling back to sync on missing dependencies or error.
         """
-        if not is_proxy_allowed(proxy_url, self.allow_clearnet):
+        with self._lock:
+            allow_clearnet = self.allow_clearnet
+
+        if not is_proxy_allowed(proxy_url, allow_clearnet):
             return {
                 "url": url,
                 "status": "filtered",
@@ -978,7 +991,7 @@ class OnionFetcher:
                         continue
 
                     return {
-                        "url": final_url if ".onion" in final_url else url,
+                        "url": final_url if is_onion_host(final_url) else url,
                         "status": "dead",
                         "code": last_code,
                         "ts": now_ts,
@@ -1015,6 +1028,6 @@ class OnionFetcher:
                 "category": "other",
             }
 
-        url_to_save = final_url if ".onion" in final_url else url
+        url_to_save = final_url if is_onion_host(final_url) else url
         return self.parse_html_content(html, url_to_save, url, now_ts)
 

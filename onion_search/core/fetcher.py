@@ -26,6 +26,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse
+import urllib.parse
 import urllib.robotparser
 from bs4 import BeautifulSoup
 import aiohttp
@@ -38,8 +39,14 @@ from onion_search.core.detector import (
     extract_bitcoin_addresses,
     extract_fingerprint,
 )
+from onion_search.config import MAX_RESPONSE_BYTES
 from onion_search.core.seeds import SeedManager
-from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET, normalize_onion_url
+from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET, is_onion_host, normalize_onion_url
+from onion_search.utils.net_guard import (
+    TorOnlyViolation,
+    guarded_get,
+    is_proxy_allowed,
+)
 
 try:
     import httpx
@@ -150,7 +157,7 @@ class RobotsChecker:
         self.cache = {}
         self.lock = threading.Lock()
 
-    def is_allowed(self, url, sess=None):
+    def is_allowed(self, url, sess=None, proxy_url=None, allow_clearnet=False):
         if not self.enabled:
             return True
         parsed = urlparse(url)
@@ -166,11 +173,12 @@ class RobotsChecker:
         robots_url = f"{parsed.scheme}://{domain}/robots.txt"
         rp = None
         try:
-            if sess:
-                resp = sess.get(robots_url, timeout=8)
-                if resp.status_code == 200:
-                    rp = urllib.robotparser.RobotFileParser()
-                    rp.parse(resp.text.splitlines())
+            resp = guarded_get(
+                robots_url, proxy_url=proxy_url, allow_clearnet=allow_clearnet, timeout=8
+            )
+            if resp.status_code == 200:
+                rp = urllib.robotparser.RobotFileParser()
+                rp.parse(resp.text.splitlines())
         except Exception:
             rp = None
 
@@ -204,13 +212,22 @@ class OnionFetcher:
         domain_delay=0.7,
         respect_robots=False,
         seed_manager=None,
+        allow_clearnet=False,
     ):
+        self._lock = threading.Lock()
         self.session_manager = session_manager or SessionManager()
         self.detector = detector or ContentDetector()
         self.max_retries = max_retries
         self.rate_limiter = DomainRateLimiter(min_domain_delay=domain_delay)
         self.robots_checker = RobotsChecker(enabled=respect_robots)
         self.seed_manager = seed_manager or SeedManager()
+        self.allow_clearnet = allow_clearnet
+
+    def set_allow_clearnet(self, value: bool) -> None:
+        """Thread-safely update allow_clearnet setting and log security event."""
+        with self._lock:
+            self.allow_clearnet = bool(value)
+        logging.getLogger("onion_search").info(f"[SECURITY] allow_clearnet -> {bool(value)}")
 
     def fetch_tor66_seeds(
         self, proxy_url: Optional[str] = None, allow_clearnet: bool = False
@@ -270,40 +287,39 @@ class OnionFetcher:
     ) -> set:
         """
         Fetch discovered .onion addresses from GitHub and Ahmia lists.
-        Enforces Tor proxy routing unless clearnet is explicitly enabled.
+        Enforces Tor proxy routing unless clearnet is explicitly enabled via net_guard.
         """
-        if not allow_clearnet and not proxy_url:
-            logging.getLogger("onion_search").warning(
-                "[SECURITY] Clearnet seed letöltés blokkolva! Tor-only védelem aktív."
-            )
-            return set()
-
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         found = set()
         reg = re.compile(r"[a-z2-7]{56}\.onion")
         for src in GITHUB_SOURCES:
             try:
-                r = requests.get(
+                r = guarded_get(
                     src,
+                    proxy_url=proxy_url,
+                    allow_clearnet=allow_clearnet,
                     timeout=15,
                     headers=random.choice(HEADERS_LIST),
-                    proxies=proxies,
                 )
                 for m in reg.findall(r.text):
                     found.add(f"http://{m}")
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger("onion_search").warning(
+                    f"[SECURITY] fetch_github_seeds nem sikerült: {e}"
+                )
         try:
-            r = requests.get(
+            r = guarded_get(
                 "https://ahmia.fi/onions/",
+                proxy_url=proxy_url,
+                allow_clearnet=allow_clearnet,
                 timeout=15,
                 headers=random.choice(HEADERS_LIST),
-                proxies=proxies,
             )
             for m in reg.findall(r.text):
                 found.add(f"http://{m}")
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger("onion_search").warning(
+                f"[SECURITY] fetch_github_seeds ahmia.fi nem sikerült: {e}"
+            )
         return found
 
     def search_ahmia(
@@ -317,23 +333,17 @@ class OnionFetcher:
         Query Ahmia search engine for keywords and extract .onion links.
         Prevents deanonymization by routing through Tor proxy unless clearnet is allowed.
         """
-        if not allow_clearnet and not proxy_url:
-            logging.getLogger("onion_search").warning(
-                "[SECURITY] Ahmia clearnet lekérdezés blokkolva! Tor-only mód aktív."
-            )
-            return set()
-
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         all_onions = set()
         for q in queries:
             if is_running_cb and not is_running_cb():
                 break
             try:
-                r = requests.get(
+                r = guarded_get(
                     f"https://ahmia.fi/search/?q={requests.utils.quote(q)}",
+                    proxy_url=proxy_url,
+                    allow_clearnet=allow_clearnet,
                     timeout=15,
                     headers=random.choice(HEADERS_LIST),
-                    proxies=proxies,
                 )
                 soup = BeautifulSoup(r.text, HTML_PARSER)
                 for a in soup.find_all("a", href=True):
@@ -344,19 +354,29 @@ class OnionFetcher:
                         norm = normalize_onion_url(h)
                         if norm:
                             all_onions.add(norm)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger("onion_search").warning(
+                    f"[SECURITY] search_ahmia lekérdezés nem sikerült: {e}"
+                )
         return all_onions
 
-    def search_onionsearchengine(self, queries, is_running_cb=None):
+    def search_onionsearchengine(
+        self,
+        queries,
+        proxy_url: Optional[str] = None,
+        allow_clearnet: bool = False,
+        is_running_cb=None,
+    ) -> set:
         """Query OnionSearchEngine for keywords and extract .onion links."""
         all_onions = set()
         for q in queries:
             if is_running_cb and not is_running_cb():
                 break
             try:
-                r = requests.get(
+                r = guarded_get(
                     f"https://onionsearchengine.com/search.php?search={requests.utils.quote(q)}",
+                    proxy_url=proxy_url,
+                    allow_clearnet=allow_clearnet,
                     timeout=15,
                     headers=random.choice(HEADERS_LIST),
                 )
@@ -367,8 +387,10 @@ class OnionFetcher:
                         norm = normalize_onion_url(h)
                         if norm:
                             all_onions.add(norm)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger("onion_search").warning(
+                    f"[SECURITY] search_onionsearchengine lekérdezés nem sikerült: {e}"
+                )
         return all_onions
 
     def parse_html_content(self, html, final_url, url, now_ts):
@@ -420,11 +442,25 @@ class OnionFetcher:
         """
         Synchronous fetch with domain rate limiting, retry logic, and lxml parsing.
         """
+        with self._lock:
+            allow_clearnet = self.allow_clearnet
+
         now_ts = time.time()
         domain = urlparse(url).netloc
-        sess = self.session_manager.get_session(proxy_url)
 
-        if not self.robots_checker.is_allowed(url, sess):
+        if not is_proxy_allowed(proxy_url, allow_clearnet):
+            return {
+                "url": url,
+                "status": "filtered",
+                "reason": "Clearnet access disallowed without Tor proxy",
+                "ts": now_ts,
+                "lang": "en",
+                "category": "other",
+            }
+
+        if not self.robots_checker.is_allowed(
+            url, proxy_url=proxy_url, allow_clearnet=allow_clearnet
+        ):
             return {
                 "url": url,
                 "status": "filtered",
@@ -451,27 +487,62 @@ class OnionFetcher:
 
             self.rate_limiter.wait_for_domain(domain)
 
-            if random.random() < 0.3:
-                sess.headers.update(random.choice(HEADERS_LIST))
-
             try:
-                r = sess.get(url, timeout=TIMEOUT_GET, allow_redirects=True)
-                final_url = r.url
+                headers = random.choice(HEADERS_LIST)
+                cur_url = url
+                max_redirects = 5
+                redirect_count = 0
+                r = None
+
+                while redirect_count <= max_redirects:
+                    r = guarded_get(
+                        cur_url,
+                        proxy_url=proxy_url,
+                        allow_clearnet=allow_clearnet,
+                        timeout=TIMEOUT_GET,
+                        allow_redirects=False,
+                        headers=headers,
+                        stream=True,
+                    )
+
+                    if r.status_code in (301, 302, 303, 307, 308) and "Location" in r.headers:
+                        raw_loc = r.headers["Location"]
+                        next_url = urllib.parse.urljoin(cur_url, raw_loc)
+
+                        if not allow_clearnet and not is_onion_host(next_url):
+                            r.close()
+                            return {
+                                "url": next_url,
+                                "status": "filtered",
+                                "reason": "redirect to clearnet disallowed",
+                                "ts": now_ts,
+                                "lang": "en",
+                                "category": "other",
+                            }
+                        cur_url = next_url
+                        redirect_count += 1
+                        r.close()
+                    else:
+                        break
+
+                final_url = cur_url
                 last_code = r.status_code
 
                 if r.status_code in (429, 503) and attempt < self.max_retries:
+                    r.close()
                     backoff = (2**attempt) * 1.5
                     time.sleep(backoff)
                     continue
 
-                if r.status_code != 200 or len(r.text) < 300:
+                if r.status_code != 200:
+                    r.close()
                     if r.status_code in (500, 502, 504) and attempt < self.max_retries:
                         backoff = 2**attempt
                         time.sleep(backoff)
                         continue
 
                     return {
-                        "url": final_url if ".onion" in final_url else url,
+                        "url": final_url if is_onion_host(final_url) else url,
                         "status": "dead",
                         "code": r.status_code,
                         "ts": now_ts,
@@ -479,10 +550,60 @@ class OnionFetcher:
                         "category": "other",
                     }
 
-                html = r.text
+                chunks = []
+                downloaded = 0
+                too_large = False
+                for chunk in r.iter_content(chunk_size=8192):
+                    downloaded += len(chunk)
+                    if downloaded > MAX_RESPONSE_BYTES:
+                        too_large = True
+                        break
+                    chunks.append(chunk)
+
+                r.close()
+
+                if too_large:
+                    return {
+                        "url": final_url if is_onion_host(final_url) else url,
+                        "status": "dead",
+                        "err": "too_large",
+                        "ts": now_ts,
+                        "lang": "en",
+                        "category": "other",
+                    }
+
+                raw_bytes = b"".join(chunks)
+                if len(raw_bytes) < 300:
+                    return {
+                        "url": final_url if is_onion_host(final_url) else url,
+                        "status": "dead",
+                        "code": r.status_code,
+                        "ts": now_ts,
+                        "lang": "en",
+                        "category": "other",
+                    }
+
+                encoding = r.encoding or "utf-8"
+                try:
+                    html = raw_bytes.decode(encoding, errors="replace")
+                except Exception:
+                    html = raw_bytes.decode("utf-8", errors="replace")
                 break
 
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, Exception) as e:
+            except TorOnlyViolation:
+                return {
+                    "url": url,
+                    "status": "filtered",
+                    "reason": "TorOnlyViolation",
+                    "ts": now_ts,
+                    "lang": "en",
+                    "category": "other",
+                }
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                Exception,
+            ) as e:
                 last_error = str(e)[:100]
                 if attempt < self.max_retries:
                     backoff = 2**attempt
@@ -508,18 +629,38 @@ class OnionFetcher:
                 "category": "other",
             }
 
-        url_to_save = final_url if ".onion" in final_url else url
+        url_to_save = final_url if is_onion_host(final_url) else url
         return self.parse_html_content(html, url_to_save, url, now_ts)
 
-    async def async_fetch_page_httpx(self, client, url, is_running_cb=None):
+    async def async_fetch_page_httpx(self, client, url, is_running_cb=None, proxy_url=None):
         """
         Asynchronous fetch using httpx.AsyncClient with SOCKS5h Tor proxy support,
         retry logic, rate limiting, and lxml HTML parsing.
         """
+        with self._lock:
+            allow_clearnet = self.allow_clearnet
+
         now_ts = time.time()
         domain = urlparse(url).netloc
 
-        if not self.robots_checker.is_allowed(url, None):
+        if not is_proxy_allowed(proxy_url, allow_clearnet):
+            return {
+                "url": url,
+                "status": "filtered",
+                "reason": "Clearnet access disallowed without Tor proxy",
+                "ts": now_ts,
+                "lang": "en",
+                "category": "other",
+            }
+
+        allowed = await asyncio.to_thread(
+            self.robots_checker.is_allowed,
+            url,
+            None,
+            proxy_url=proxy_url,
+            allow_clearnet=allow_clearnet,
+        )
+        if not allowed:
             return {
                 "url": url,
                 "status": "filtered",
@@ -547,44 +688,98 @@ class OnionFetcher:
             await self.rate_limiter.async_wait_for_domain(domain)
 
             headers = random.choice(HEADERS_LIST)
+            retry_delay = None
             try:
-                res = client.get(url, headers=headers)
-                if asyncio.iscoroutine(res):
-                    r = await res
-                elif hasattr(res, "__aenter__"):
-                    async with res as r_cm:
-                        r = r_cm
-                else:
-                    r = res
+                cur_url = url
+                max_redirects = 5
+                redirect_count = 0
+                too_large = False
 
-                final_url = str(getattr(r, "url", url))
-                last_code = getattr(r, "status_code", 200)
-                text = getattr(r, "text", "")
-                if asyncio.iscoroutine(text):
-                    text = await text
+                while redirect_count <= max_redirects:
+                    stream_cm = client.stream("GET", cur_url, headers=headers, follow_redirects=False)
+                    async with stream_cm as r:
+                        last_code = getattr(r, "status_code", 200)
+                        location_val = None
+                        if hasattr(r, "headers") and r.headers:
+                            for k, v in r.headers.items():
+                                if k.lower() == "location":
+                                    location_val = v
+                                    break
 
-                if last_code in (429, 503) and attempt < self.max_retries:
-                    backoff = (2**attempt) * 1.5
-                    await asyncio.sleep(backoff)
+                        if last_code in (301, 302, 303, 307, 308) and location_val:
+                            next_url = urllib.parse.urljoin(cur_url, location_val)
+
+                            if not allow_clearnet and not is_onion_host(next_url):
+                                return {
+                                    "url": next_url,
+                                    "status": "filtered",
+                                    "reason": "redirect to clearnet disallowed",
+                                    "ts": now_ts,
+                                    "lang": "en",
+                                    "category": "other",
+                                }
+                            cur_url = next_url
+                            redirect_count += 1
+                            continue
+
+                        final_url = str(getattr(r, "url", cur_url))
+                        if last_code in (429, 503) and attempt < self.max_retries:
+                            retry_delay = (2**attempt) * 1.5
+                            break
+
+                        if last_code in (500, 502, 504) and attempt < self.max_retries:
+                            retry_delay = 2**attempt
+                            break
+
+                        if last_code != 200:
+                            return {
+                                "url": final_url if is_onion_host(final_url) else url,
+                                "status": "dead",
+                                "code": last_code,
+                                "ts": now_ts,
+                                "lang": "en",
+                                "category": "other",
+                            }
+
+                        chunks = []
+                        downloaded = 0
+                        async for chunk in r.aiter_bytes():
+                            downloaded += len(chunk)
+                            if downloaded > MAX_RESPONSE_BYTES:
+                                too_large = True
+                                break
+                            chunks.append(chunk)
+
+                        if too_large:
+                            return {
+                                "url": final_url if is_onion_host(final_url) else url,
+                                "status": "dead",
+                                "err": "too_large",
+                                "ts": now_ts,
+                                "lang": "en",
+                                "category": "other",
+                            }
+
+                        raw_bytes = b"".join(chunks)
+                        if len(raw_bytes) < 300:
+                            return {
+                                "url": final_url if is_onion_host(final_url) else url,
+                                "status": "dead",
+                                "code": last_code,
+                                "ts": now_ts,
+                                "lang": "en",
+                                "category": "other",
+                            }
+
+                        html = raw_bytes.decode("utf-8", errors="replace")
+                        break
+
+                if retry_delay is not None:
+                    await asyncio.sleep(retry_delay)
                     continue
 
-                if last_code != 200 or len(text) < 300:
-                    if last_code in (500, 502, 504) and attempt < self.max_retries:
-                        backoff = 2**attempt
-                        await asyncio.sleep(backoff)
-                        continue
-
-                    return {
-                        "url": final_url if ".onion" in final_url else url,
-                        "status": "dead",
-                        "code": last_code,
-                        "ts": now_ts,
-                        "lang": "en",
-                        "category": "other",
-                    }
-
-                html = text
-                break
+                if html is not None:
+                    break
 
             except Exception as e:
                 last_error = str(e)[:100]
@@ -612,13 +807,13 @@ class OnionFetcher:
                 "category": "other",
             }
 
-        url_to_save = final_url if ".onion" in final_url else url
+        url_to_save = final_url if is_onion_host(final_url) else url
         return self.parse_html_content(html, url_to_save, url, now_ts)
 
     def fetch_url(
         self,
         url: str,
-        proxy_url: str,
+        proxy_url: Optional[str] = None,
         is_running_cb: Optional[Callable[[], bool]] = None,
         async_mode: bool = False,
     ) -> Dict[str, Any]:
@@ -627,6 +822,19 @@ class OnionFetcher:
         Uses synchronous requests if async_mode is False.
         Uses httpx/asyncio if async_mode is True, falling back to sync on missing dependencies or error.
         """
+        with self._lock:
+            allow_clearnet = self.allow_clearnet
+
+        if not is_proxy_allowed(proxy_url, allow_clearnet):
+            return {
+                "url": url,
+                "status": "filtered",
+                "reason": "Clearnet access disallowed without Tor proxy",
+                "ts": time.time(),
+                "lang": "en",
+                "category": "other",
+            }
+
         if not async_mode:
             return self.fetch_page(url, proxy_url, is_running_cb=is_running_cb)
 
@@ -642,7 +850,7 @@ class OnionFetcher:
                 if proxy_url:
                     transport_kwargs["proxy"] = proxy_url
                 async with httpx.AsyncClient(timeout=TIMEOUT_GET, follow_redirects=True, **transport_kwargs) as client:
-                    return await self.async_fetch_page_httpx(client, url, is_running_cb=is_running_cb)
+                    return await self.async_fetch_page_httpx(client, url, is_running_cb=is_running_cb, proxy_url=proxy_url)
 
             try:
                 loop = asyncio.get_running_loop()
@@ -762,7 +970,7 @@ class OnionFetcher:
                         continue
 
                     return {
-                        "url": final_url if ".onion" in final_url else url,
+                        "url": final_url if is_onion_host(final_url) else url,
                         "status": "dead",
                         "code": last_code,
                         "ts": now_ts,
@@ -799,6 +1007,6 @@ class OnionFetcher:
                 "category": "other",
             }
 
-        url_to_save = final_url if ".onion" in final_url else url
+        url_to_save = final_url if is_onion_host(final_url) else url
         return self.parse_html_content(html, url_to_save, url, now_ts)
 

@@ -170,6 +170,7 @@ class MainWindow:
         self.total_threshold_var = tk.IntVar(value=cfg.total_threshold)
         self.auto_save_var = tk.BooleanVar(value=cfg.auto_save)
         self.allow_clearnet_var = tk.BooleanVar(value=cfg.allow_clearnet)
+        self.allow_clearnet_var.trace_add("write", lambda *args: self.fetcher.set_allow_clearnet(self.allow_clearnet_var.get()))
         self.encrypt_storage_var = tk.BooleanVar(value=cfg.encrypt_storage)
         self.auto_seed_var = tk.BooleanVar(value=getattr(cfg, "auto_update_seeds", True))
         self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
@@ -560,6 +561,7 @@ class MainWindow:
             self.total_threshold_var.set(new_cfg.total_threshold)
             self.auto_save_var.set(new_cfg.auto_save)
             self.allow_clearnet_var.set(new_cfg.allow_clearnet)
+            self.fetcher.set_allow_clearnet(new_cfg.allow_clearnet)
             self.encrypt_storage_var.set(new_cfg.encrypt_storage)
             self.auto_seed_var.set(new_cfg.auto_update_seeds)
             self.host_only_var.set(new_cfg.normalize_to_host_only)
@@ -2972,6 +2974,7 @@ class MainWindow:
         """Start fresh search from Ahmia queries + extra onions."""
         if self.running:
             return
+        self.fetcher.set_allow_clearnet(self.allow_clearnet_var.get())
         self.start_time = time.time()
         self.set_statusbar_color("#2980b9", msg="Keresés indítása...")
         
@@ -2998,6 +3001,7 @@ class MainWindow:
         """Resume search directly from existing pending_queue."""
         if self.running or not self.pending_queue:
             return
+        self.fetcher.set_allow_clearnet(self.allow_clearnet_var.get())
         self.start_time = time.time()
         self.set_statusbar_color("#2980b9", msg=f"Keresés folytatása ({len(self.pending_queue)} URL)...")
         
@@ -3028,6 +3032,7 @@ class MainWindow:
 
     def run_search(self, resume_queue: bool = False, raw_q: str = "", extra_raw: str = "", workers: int = 6, backend: str = "JSON", auto_save: bool = True, port: str = "9050", auto_newnym_success: bool = False, auto_newnym_total: bool = False) -> None:
         self.running = True
+        self.fetcher.set_allow_clearnet(self.allow_clearnet_var.get())
         proxy = f"socks5h://127.0.0.1:{port}"
 
         if resume_queue and self.pending_queue:
@@ -3086,7 +3091,10 @@ class MainWindow:
                 self.log_msg(f"[SEARCH] Ahmia találatok száma ({len(all_onions)}) >= 30, OnionSearchEngine kihagyva.", force=True, tag="info")
             else:
                 ose_onions = self.fetcher.search_onionsearchengine(
-                    queries, is_running_cb=lambda: self.running
+                    queries,
+                    proxy_url=proxy,
+                    allow_clearnet=self.allow_clearnet_var.get(),
+                    is_running_cb=lambda: self.running,
                 )
                 for u in ose_onions:
                     norm = normalize_onion_url(u)

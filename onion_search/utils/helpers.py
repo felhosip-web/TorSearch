@@ -130,6 +130,20 @@ from urllib.parse import urlparse
 ONION_HOST_REGEX: re.Pattern[str] = re.compile(r"^[a-z2-7]{16,56}\.onion$", re.IGNORECASE)
 
 
+def is_onion_host(url: str) -> bool:
+    """
+    Check if the URL hostname strictly ends with '.onion'.
+    Returns True only if hostname is non-empty, lowercased, and ends with '.onion'.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        hostname = (urlparse(url).hostname or "").strip().lower()
+        return bool(hostname and hostname.endswith(".onion"))
+    except Exception:
+        return False
+
+
 def normalize_onion_url(url: str, host_only: bool = False) -> Optional[str]:
     """
     Normalize and validate .onion URLs according to strict criteria:

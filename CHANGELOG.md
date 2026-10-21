@@ -1,5 +1,24 @@
 # Changelog
 
+## [5.0.1] - 2026-10-20
+
+### Biztonság
+- **Tor-only kikényszerítés és központi net_guard**
+  - Új `onion_search/utils/net_guard.py` modul szigorú `socks5h://` ellenőrzéssel a DNS-szivárgások teljes megelőzésére.
+  - Szigorú `TorOnlyViolation` kivétel dobása és `[SECURITY]` naplózás szanitizált (query paraméterek nélküli) URL-ekkel, amennyiben proxy hiányában clearnet kérés indulna.
+  - Az összes HTTP hálózati kérés (`search_onionsearchengine`, `search_ahmia`, `fetch_github_seeds`, `RobotsChecker`, `fetch_page`, `fetch_url`, seed pluginok) átirányítása a központi guardon keresztül.
+  - SOCKS5h séma kötelezővé tétele sima `socks5://` helyett.
+  - Maximális válaszméret korlátozás (`MAX_RESPONSE_BYTES = 2MB`) streamelt és darabolt beolvasással (`too_large` hiba státusz).
+  - Nem `.onion` átirányítások (redirect) blokkolása `allow_clearnet = False` mellett (`filtered` státusszal).
+  - Új `tests/test_tor_guard.py` tesztkészlet és statikus AST forráskód ellenőrzés a kimenő kérések központi védelmének igazolására.
+  - Dinamikus `allow_clearnet` szinkronizáció a felületről az `OnionFetcher`-be szálbiztos `set_allow_clearnet` metódussal és nyomon követéssel.
+  - Szigorú `is_onion_host` domain ellenőrzés és URL feloldás (`urljoin`) a hamis `.onion` aldomainek (pl. `onion.example.com`) és relatív átirányítások biztonságos szűrésére.
+
+### Javítva
+- Exponenciális backoff várakozás és 5xx kódok újrapróbálásának visszaállítása az `async_fetch_page_httpx` ágban.
+- `RobotsChecker.is_allowed` hívások áthelyezése `asyncio.to_thread`-re a nem blokkoló event loop működés érdekében.
+- Duck-typing tartalék ág (`client.get`) törlése az `async_fetch_page_httpx`-ből a szigorú stream interfész javára.
+
 ## [5.0.0] - 2026-10-20
 
 ### Hozzáadva

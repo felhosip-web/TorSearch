@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 from onion_search.utils.helpers import HEADERS_LIST, normalize_onion_url
+from onion_search.utils.net_guard import TorOnlyViolation, guarded_request
 
 logger = logging.getLogger("onion_search")
 ONION_REGEX = re.compile(
@@ -84,7 +85,7 @@ class BaseSeedPlugin(ABC):
         method: str = "GET",
     ) -> Optional[requests.Response]:
         """
-        Execute HTTP request enforcing Tor proxy security policy.
+        Execute HTTP request enforcing Tor proxy security policy via net_guard.
         """
         req_timeout = timeout or self.timeout
         is_onion = ".onion" in url
@@ -95,13 +96,6 @@ class BaseSeedPlugin(ABC):
             )
             return None
 
-        if not is_onion and not allow_clearnet and not proxy_url:
-            logger.warning(
-                f"[SECURITY] Plugin '{self.id}': Clearnet URL blocked by Tor-only protection: {url}"
-            )
-            return None
-
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         req_headers = headers.copy() if headers else {}
         if "User-Agent" not in req_headers:
             if self.user_agent:
@@ -111,15 +105,17 @@ class BaseSeedPlugin(ABC):
 
         for attempt in range(self.max_retries + 1):
             try:
-                if method.upper() == "HEAD":
-                    r = requests.head(
-                        url, timeout=req_timeout, headers=req_headers, proxies=proxies
-                    )
-                else:
-                    r = requests.get(
-                        url, timeout=req_timeout, headers=req_headers, proxies=proxies
-                    )
-                return r
+                return guarded_request(
+                    url,
+                    proxy_url=proxy_url,
+                    allow_clearnet=allow_clearnet,
+                    method=method,
+                    timeout=req_timeout,
+                    headers=req_headers,
+                )
+            except TorOnlyViolation as e:
+                logger.warning(f"[SEED PLUGIN '{self.id}'] TorOnlyViolation: {e}")
+                return None
             except Exception as e:
                 logger.debug(
                     f"[SEED PLUGIN '{self.id}'] Request failed ({url}, attempt {attempt + 1}): {e}"

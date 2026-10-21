@@ -40,6 +40,7 @@ DEFAULT_SEEDS_FILE = STATE_DIR / "seeds_cache.json"
 # Network & Scraping Constants (eliminating magic numbers)
 DEFAULT_TIMEOUT_GET: int = 20
 TIMEOUT_GET: int = DEFAULT_TIMEOUT_GET
+MAX_RESPONSE_BYTES: int = 2 * 1024 * 1024
 MIN_HTML_BODY_LENGTH: int = 300
 MIN_TEXT_CONTENT_LENGTH: int = 200
 MAX_CONTENT_TEXT_LENGTH: int = 8000

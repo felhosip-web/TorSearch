@@ -13,7 +13,7 @@
 # limitations under the License.
 """
 High-performance network operations, async/sync fetchers, domain rate-limiting, and retry logic.
-Uses lxml for 3-5x faster HTML parsing and httpx/aiohttp for async socket reuse.
+Uses lxml for 3-5x faster HTML parsing and httpx for async socket reuse.
 Developed by HES Projects by FePe.
 """
 import asyncio
@@ -29,7 +29,6 @@ from urllib.parse import urlparse
 import urllib.parse
 import urllib.robotparser
 from bs4 import BeautifulSoup
-import aiohttp
 import requests
 
 from onion_search.core.detector import (
@@ -41,7 +40,7 @@ from onion_search.core.detector import (
 )
 from onion_search.config import MAX_RESPONSE_BYTES
 from onion_search.core.seeds import SeedManager
-from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET, is_onion_host, normalize_onion_url
+from onion_search.utils.helpers import GITHUB_SOURCES, HEADERS_LIST, TIMEOUT_GET, get_request_headers, is_onion_host, normalize_onion_url
 from onion_search.utils.net_guard import (
     TorOnlyViolation,
     guarded_get,
@@ -64,10 +63,11 @@ except ImportError:
 thread_local = threading.local()
 
 
-def get_session(proxy_url):
+def get_session(proxy_url, rotate_ua: bool = False):
     """Retrieve or create thread-local requests.Session configured with Tor proxy."""
     cur_proxy = getattr(thread_local, "proxy_url", None)
-    if hasattr(thread_local, "session") and cur_proxy != proxy_url:
+    cur_rotate = getattr(thread_local, "rotate_ua", None)
+    if hasattr(thread_local, "session") and (cur_proxy != proxy_url or cur_rotate != rotate_ua):
         try:
             thread_local.session.close()
         except Exception:
@@ -79,9 +79,10 @@ def get_session(proxy_url):
     if not hasattr(thread_local, "session"):
         s = requests.Session()
         s.proxies = {"http": proxy_url, "https": proxy_url}
-        s.headers.update(random.choice(HEADERS_LIST))
+        s.headers.update(get_request_headers(rotate=rotate_ua))
         thread_local.session = s
         thread_local.proxy_url = proxy_url
+        thread_local.rotate_ua = rotate_ua
     return thread_local.session
 
 
@@ -191,8 +192,8 @@ class RobotsChecker:
 class SessionManager:
     """Manages thread-local requests sessions for Tor routing."""
 
-    def get_session(self, proxy_url):
-        return get_session(proxy_url)
+    def get_session(self, proxy_url, rotate_ua: bool = False):
+        return get_session(proxy_url, rotate_ua=rotate_ua)
 
     def close_all(self):
         close_all_thread_sessions()
@@ -213,6 +214,7 @@ class OnionFetcher:
         respect_robots=False,
         seed_manager=None,
         allow_clearnet=False,
+        user_agent_rotate=False,
     ):
         self._lock = threading.Lock()
         self.session_manager = session_manager or SessionManager()
@@ -222,6 +224,14 @@ class OnionFetcher:
         self.robots_checker = RobotsChecker(enabled=respect_robots)
         self.seed_manager = seed_manager or SeedManager()
         self.allow_clearnet = allow_clearnet
+        self.user_agent_rotate = user_agent_rotate
+
+    def set_user_agent_rotate(self, value: bool) -> None:
+        """Thread-safely update user_agent_rotate setting."""
+        with self._lock:
+            self.user_agent_rotate = bool(value)
+        self.session_manager.close_all()
+        logging.getLogger("onion_search").info(f"[SECURITY] user_agent_rotate -> {bool(value)}")
 
     def set_allow_clearnet(self, value: bool) -> None:
         """Thread-safely update allow_clearnet setting and log security event."""
@@ -298,7 +308,7 @@ class OnionFetcher:
                     proxy_url=proxy_url,
                     allow_clearnet=allow_clearnet,
                     timeout=15,
-                    headers=random.choice(HEADERS_LIST),
+                    headers=get_request_headers(rotate=self.user_agent_rotate),
                 )
                 for m in reg.findall(r.text):
                     found.add(f"http://{m}")
@@ -312,7 +322,7 @@ class OnionFetcher:
                 proxy_url=proxy_url,
                 allow_clearnet=allow_clearnet,
                 timeout=15,
-                headers=random.choice(HEADERS_LIST),
+                headers=get_request_headers(rotate=self.user_agent_rotate),
             )
             for m in reg.findall(r.text):
                 found.add(f"http://{m}")
@@ -343,7 +353,7 @@ class OnionFetcher:
                     proxy_url=proxy_url,
                     allow_clearnet=allow_clearnet,
                     timeout=15,
-                    headers=random.choice(HEADERS_LIST),
+                    headers=get_request_headers(rotate=self.user_agent_rotate),
                 )
                 soup = BeautifulSoup(r.text, HTML_PARSER)
                 for a in soup.find_all("a", href=True):
@@ -378,7 +388,7 @@ class OnionFetcher:
                     proxy_url=proxy_url,
                     allow_clearnet=allow_clearnet,
                     timeout=15,
-                    headers=random.choice(HEADERS_LIST),
+                    headers=get_request_headers(rotate=self.user_agent_rotate),
                 )
                 soup = BeautifulSoup(r.text, HTML_PARSER)
                 for a in soup.find_all("a", href=True):
@@ -488,7 +498,7 @@ class OnionFetcher:
             self.rate_limiter.wait_for_domain(domain)
 
             try:
-                headers = random.choice(HEADERS_LIST)
+                headers = get_request_headers(rotate=self.user_agent_rotate)
                 cur_url = url
                 max_redirects = 5
                 redirect_count = 0
@@ -687,7 +697,7 @@ class OnionFetcher:
 
             await self.rate_limiter.async_wait_for_domain(domain)
 
-            headers = random.choice(HEADERS_LIST)
+            headers = get_request_headers(rotate=self.user_agent_rotate)
             retry_delay = None
             try:
                 cur_url = url

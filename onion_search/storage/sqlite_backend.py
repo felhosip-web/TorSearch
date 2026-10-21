@@ -97,7 +97,18 @@ class SQLiteStorage(BaseStorage):
 
     def init_db(self) -> None:
         self.db_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import os
+            os.chmod(self.db_file.parent, 0o700)
+        except Exception:
+            pass
         con = self._get_connection()
+        try:
+            import os
+            if self.db_file.exists():
+                os.chmod(self.db_file, 0o600)
+        except Exception:
+            pass
         cur = con.cursor()
         cur.execute(
             "CREATE TABLE IF NOT EXISTS results ("
@@ -206,8 +217,9 @@ class SQLiteStorage(BaseStorage):
             sql_params.append(category)
 
         if query:
-            where_clauses.append("(title LIKE ? OR snippet LIKE ? OR url LIKE ?)")
-            q_pat = f"%{query}%"
+            escaped_q = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where_clauses.append("(title LIKE ? ESCAPE '\\' OR snippet LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')")
+            q_pat = f"%{escaped_q}%"
             sql_params.extend([q_pat, q_pat, q_pat])
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""

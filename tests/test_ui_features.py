@@ -61,6 +61,33 @@ def test_log_panel_search_and_category_filtering():
 
     root.destroy()
 
+def test_panic_wipe_key_bindings(tmp_path):
+    root = tk.Tk()
+    root.withdraw()
+
+    from onion_search.storage.sqlite_backend import SQLiteBackend
+    from onion_search.storage.json_backend import JSONBackend
+    test_db = tmp_path / "test.db"
+    test_json = tmp_path / "test.json"
+    test_dead = tmp_path / "dead.json"
+
+    sqlite_backend = SQLiteBackend(db_file=test_db)
+    json_backend = JSONBackend(state_file=test_json, dead_file=test_dead)
+
+    app = MainWindow(root, sqlite_backend=sqlite_backend, json_backend=json_backend)
+
+    # Check that Ctrl+Delete and Ctrl+KP_Delete are NOT bound
+    assert root.bind("<Control-Delete>") == "" or root.bind("<Control-Delete>") is None
+    assert root.bind("<Control-KP_Delete>") == "" or root.bind("<Control-KP_Delete>") is None
+
+    # Check that Ctrl+Shift+Delete, Ctrl+Shift+KP_Delete, Ctrl+Shift+BackSpace ARE bound
+    assert root.bind("<Control-Shift-Delete>") != ""
+    assert root.bind("<Control-Shift-KP_Delete>") != ""
+    assert root.bind("<Control-Shift-BackSpace>") != ""
+
+    root.destroy()
+
+
 def test_main_window_dark_mode_and_resume(tmp_path):
     root = tk.Tk()
     root.withdraw()

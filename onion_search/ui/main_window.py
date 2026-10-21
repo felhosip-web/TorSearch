@@ -171,6 +171,8 @@ class MainWindow:
         self.auto_save_var = tk.BooleanVar(value=cfg.auto_save)
         self.allow_clearnet_var = tk.BooleanVar(value=cfg.allow_clearnet)
         self.allow_clearnet_var.trace_add("write", lambda *args: self.fetcher.set_allow_clearnet(self.allow_clearnet_var.get()))
+        self.user_agent_rotate_var = tk.BooleanVar(value=getattr(cfg, "user_agent_rotate", False))
+        self.user_agent_rotate_var.trace_add("write", lambda *args: self.fetcher.set_user_agent_rotate(self.user_agent_rotate_var.get()))
         self.encrypt_storage_var = tk.BooleanVar(value=cfg.encrypt_storage)
         self.auto_seed_var = tk.BooleanVar(value=getattr(cfg, "auto_update_seeds", True))
         self.host_only_var = tk.BooleanVar(value=getattr(cfg, "normalize_to_host_only", False))
@@ -196,8 +198,6 @@ class MainWindow:
         self.root.bind("<Control-Shift-Delete>", lambda e: self.panic_wipe())
         self.root.bind("<Control-Shift-KP_Delete>", lambda e: self.panic_wipe())
         self.root.bind("<Control-Shift-BackSpace>", lambda e: self.panic_wipe())
-        self.root.bind("<Control-Delete>", lambda e: self.panic_wipe())
-        self.root.bind("<Control-KP_Delete>", lambda e: self.panic_wipe())
         self.root.bind("<Control-comma>", lambda e: self.open_settings_dialog())
 
         # Prevent race conditions by scheduling startup diagnostics after MainWindow initialization
@@ -562,6 +562,8 @@ class MainWindow:
             self.auto_save_var.set(new_cfg.auto_save)
             self.allow_clearnet_var.set(new_cfg.allow_clearnet)
             self.fetcher.set_allow_clearnet(new_cfg.allow_clearnet)
+            self.user_agent_rotate_var.set(new_cfg.user_agent_rotate)
+            self.fetcher.set_user_agent_rotate(new_cfg.user_agent_rotate)
             self.encrypt_storage_var.set(new_cfg.encrypt_storage)
             self.auto_seed_var.set(new_cfg.auto_update_seeds)
             self.host_only_var.set(new_cfg.normalize_to_host_only)

@@ -15,6 +15,7 @@
 Tor network identity, SOCKS/control checks, and NEWNYM circuit signaling.
 Developed by HES Projects by FePe.
 """
+import os
 from pathlib import Path
 import random
 import socket
@@ -23,32 +24,37 @@ import requests
 
 
 def find_tor_cookie():
-    """Search common Tor data directories for the control_auth_cookie file."""
-    candidates = [
-        Path.home() / ".tor" / "control_auth_cookie",
-        Path("/var/run/tor/control.authcookie"),
+    """Search common Tor data directories for the control_auth_cookie file without recursive rglob."""
+    env_cookie = os.environ.get("TOR_CONTROL_COOKIE")
+    if env_cookie:
+        p = Path(env_cookie)
+        if p.exists():
+            return p
+
+    home = Path.home()
+    known_paths = [
+        home / ".tor" / "control_auth_cookie",
         Path("/run/tor/control.authcookie"),
+        Path("/var/run/tor/control.authcookie"),
+        Path("/var/lib/tor/control_auth_cookie"),
     ]
-    for base in [
-        Path.home() / ".local" / "share",
-        Path.home() / ".tor",
-        Path.home() / ".config",
-    ]:
+    for p in known_paths:
+        if p.exists():
+            return p
+
+    glob_patterns = [
+        ".local/share/torbrowser/tbb/*/tor-browser/Browser/TorBrowser/Data/Tor/control_auth_cookie",
+        "tor-browser*/Browser/TorBrowser/Data/Tor/control_auth_cookie",
+        "Downloads/tor-browser*/Browser/TorBrowser/Data/Tor/control_auth_cookie",
+    ]
+    for pat in glob_patterns:
         try:
-            for p in base.rglob("control_auth_cookie"):
-                candidates.append(p)
+            for p in home.glob(pat):
+                if p.exists():
+                    return p
         except Exception:
             pass
-    try:
-        for p in Path.home().rglob("control_auth_cookie"):
-            if "TorBrowser" in str(p):
-                candidates.append(p)
-                break
-    except Exception:
-        pass
-    for c in candidates:
-        if c.exists():
-            return c
+
     return None
 
 

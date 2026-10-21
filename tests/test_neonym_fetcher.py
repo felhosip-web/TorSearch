@@ -16,6 +16,38 @@ from onion_search.core.fetcher import (
     close_all_thread_sessions,
 )
 
+from pathlib import Path
+
+def test_find_tor_cookie_no_rglob(monkeypatch, tmp_path):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Create cookie in expected location
+    cookie_file = fake_home / ".tor" / "control_auth_cookie"
+    cookie_file.parent.mkdir(parents=True)
+    cookie_file.write_bytes(b"12345678")
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    # Ensure Path.rglob raises an exception if called to verify no rglob is used
+    def forbidden_rglob(*args, **kwargs):
+        pytest.fail("Path.rglob must not be called!")
+
+    monkeypatch.setattr(Path, "rglob", forbidden_rglob)
+
+    found = find_tor_cookie()
+    assert found == cookie_file
+
+
+def test_find_tor_cookie_env_var(monkeypatch, tmp_path):
+    env_cookie = tmp_path / "custom_cookie"
+    env_cookie.write_bytes(b"87654321")
+
+    monkeypatch.setenv("TOR_CONTROL_COOKIE", str(env_cookie))
+    found = find_tor_cookie()
+    assert found == env_cookie
+
+
 def test_session_manager():
     mgr = SessionManager()
     s1 = mgr.get_session("socks5h://127.0.0.1:9050")

@@ -15,11 +15,51 @@
 Filter panel UI and matching logic for language, category, and precise queries.
 Developed by HES Projects by FePe.
 """
+import logging
 import re
 import tkinter as tk
 from tkinter import ttk
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from onion_search.utils.helpers import parse_list
+
+logger = logging.getLogger("onion_search")
+
+try:
+    import regex as regex_lib
+    REGEX_PACKAGE_AVAILABLE = True
+except ImportError:
+    REGEX_PACKAGE_AVAILABLE = False
+
+
+def safe_regex_search(pat: str, text: str, max_text_len: int = 200000) -> Tuple[bool, Optional[str]]:
+    """
+    Perform a safe regex search with ReDoS protection.
+    Limits input text length to max_text_len (default 200,000 characters).
+    Returns (match_found, error_or_reason_str).
+    """
+    bounded_text = text[:max_text_len]
+    if REGEX_PACKAGE_AVAILABLE:
+        try:
+            m = regex_lib.search(pat, bounded_text, flags=regex_lib.IGNORECASE, timeout=0.5)
+            return (m is not None, None)
+        except TimeoutError:
+            logger.warning(f"[SECURITY] ReDoS timeout triggered for regex pattern: {pat[:30]}...")
+            return (False, "regex időtúllépés (ReDoS gyanú)")
+        except Exception as e:
+            return (False, f"regex hiba: {e}")
+    else:
+        # Fallback stdlib re with nested quantifier heuristic detection
+        # Check for risky patterns like (...+)+, (...*)*, (...+)*, (...*)+
+        risky_heuristic = re.search(r"\([^)]*[\+\*]\)[\+\*]", pat)
+        if risky_heuristic:
+            logger.warning(f"[SECURITY] Potenciális ReDoS minta elutasítva (stdlib fallback): {pat[:30]}...")
+            return (False, "potenciális ReDoS minta elutasítva")
+
+        try:
+            m = re.search(pat, bounded_text, re.IGNORECASE)
+            return (m is not None, None)
+        except re.error as e:
+            return (False, f"regex hiba: {e}")
 
 
 def matches_precise_filter(
@@ -50,11 +90,11 @@ def matches_precise_filter(
             pat = kw
         else:
             pat = re.escape(kw)
-        try:
-            if not re.search(pat, t_lower, re.IGNORECASE):
-                return False, f"hiányzik MUST ALL: {kw}"
-        except re.error as e:
-            return False, f"regex hiba MUST ALL: {e}"
+        matched, err = safe_regex_search(pat, t_lower)
+        if err:
+            return False, f"regex hiba MUST ALL: {err}"
+        if not matched:
+            return False, f"hiányzik MUST ALL: {kw}"
 
     must_any_list: List[str] = parse_list(must_any)
     if must_any_list:
@@ -66,12 +106,10 @@ def matches_precise_filter(
                 pat = kw
             else:
                 pat = re.escape(kw)
-            try:
-                if re.search(pat, t_lower, re.IGNORECASE):
-                    any_found = True
-                    break
-            except re.error:
-                pass
+            matched, err = safe_regex_search(pat, t_lower)
+            if matched and not err:
+                any_found = True
+                break
         if not any_found:
             return False, f"egyik ANY sem található: {must_any_list}"
 
@@ -83,11 +121,11 @@ def matches_precise_filter(
             pat = kw
         else:
             pat = re.escape(kw)
-        try:
-            if re.search(pat, t_lower, re.IGNORECASE):
-                return False, f"kizárt NOT találat: {kw}"
-        except re.error as e:
-            return False, f"regex hiba MUST NOT: {e}"
+        matched, err = safe_regex_search(pat, t_lower)
+        if err:
+            return False, f"regex hiba MUST NOT: {err}"
+        if matched:
+            return False, f"kizárt NOT találat: {kw}"
 
     title_c: str = title_contains.strip()
     if title_c:
@@ -100,12 +138,10 @@ def matches_precise_filter(
                 pat = tc
             else:
                 pat = re.escape(tc)
-            try:
-                if re.search(pat, title_lower, re.IGNORECASE):
-                    title_found = True
-                    break
-            except re.error:
-                pass
+            matched, err = safe_regex_search(pat, title_lower)
+            if matched and not err:
+                title_found = True
+                break
         if not title_found:
             return False, f"cím nem tartalmazza: {title_c}"
 
@@ -120,11 +156,11 @@ def matches_precise_filter(
             pat = regex_pat
         else:
             pat = re.escape(regex_pat)
-        try:
-            if not re.search(pat, text, re.IGNORECASE):
-                return False, f"regex nem illeszkedik: {regex_pat}"
-        except re.error as e:
-            return False, f"regex hiba: {e}"
+        matched, err = safe_regex_search(pat, text)
+        if err:
+            return False, err
+        if not matched:
+            return False, f"regex nem illeszkedik: {regex_pat}"
 
     return True, "OK"
 

@@ -46,7 +46,12 @@ def create_app(root=None):
     detector = ContentDetector()
     session_manager = SessionManager()
     cfg = ConfigManager().config
-    fetcher = OnionFetcher(session_manager=session_manager, detector=detector, allow_clearnet=cfg.allow_clearnet)
+    fetcher = OnionFetcher(
+        session_manager=session_manager,
+        detector=detector,
+        allow_clearnet=cfg.allow_clearnet,
+        user_agent_rotate=cfg.user_agent_rotate,
+    )
     tor_controller = TorController(on_sessions_reset=session_manager.close_all)
 
     # 3. Wire components into the UI main window

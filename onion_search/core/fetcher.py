@@ -653,9 +653,14 @@ class OnionFetcher:
                 "category": "other",
             }
 
-        if not self.robots_checker.is_allowed(
-            url, None, proxy_url=proxy_url, allow_clearnet=allow_clearnet
-        ):
+        allowed = await asyncio.to_thread(
+            self.robots_checker.is_allowed,
+            url,
+            None,
+            proxy_url=proxy_url,
+            allow_clearnet=allow_clearnet,
+        )
+        if not allowed:
             return {
                 "url": url,
                 "status": "filtered",
@@ -683,6 +688,7 @@ class OnionFetcher:
             await self.rate_limiter.async_wait_for_domain(domain)
 
             headers = random.choice(HEADERS_LIST)
+            retry_delay = None
             try:
                 cur_url = url
                 max_redirects = 5
@@ -690,103 +696,42 @@ class OnionFetcher:
                 too_large = False
 
                 while redirect_count <= max_redirects:
-                    if hasattr(client, "stream") and callable(getattr(client, "stream")):
-                        stream_cm = client.stream("GET", cur_url, headers=headers, follow_redirects=False)
-                        async with stream_cm as r:
-                            last_code = getattr(r, "status_code", 200)
-                            if last_code in (301, 302, 303, 307, 308) and "location" in r.headers:
-                                raw_loc = r.headers["location"]
-                                next_url = urllib.parse.urljoin(cur_url, raw_loc)
-
-                                if not allow_clearnet and not is_onion_host(next_url):
-                                    return {
-                                        "url": next_url,
-                                        "status": "filtered",
-                                        "reason": "redirect to clearnet disallowed",
-                                        "ts": now_ts,
-                                        "lang": "en",
-                                        "category": "other",
-                                    }
-                                cur_url = next_url
-                                redirect_count += 1
-                                continue
-
-                            final_url = str(getattr(r, "url", cur_url))
-                            if last_code in (429, 503) and attempt < self.max_retries:
-                                break
-
-                            if last_code != 200:
-                                return {
-                                    "url": final_url if is_onion_host(final_url) else url,
-                                    "status": "dead",
-                                    "code": last_code,
-                                    "ts": now_ts,
-                                    "lang": "en",
-                                    "category": "other",
-                                }
-
-                            chunks = []
-                            downloaded = 0
-                            async for chunk in r.aiter_bytes():
-                                downloaded += len(chunk)
-                                if downloaded > MAX_RESPONSE_BYTES:
-                                    too_large = True
+                    stream_cm = client.stream("GET", cur_url, headers=headers, follow_redirects=False)
+                    async with stream_cm as r:
+                        last_code = getattr(r, "status_code", 200)
+                        location_val = None
+                        if hasattr(r, "headers") and r.headers:
+                            for k, v in r.headers.items():
+                                if k.lower() == "location":
+                                    location_val = v
                                     break
-                                chunks.append(chunk)
 
-                            if too_large:
+                        if last_code in (301, 302, 303, 307, 308) and location_val:
+                            next_url = urllib.parse.urljoin(cur_url, location_val)
+
+                            if not allow_clearnet and not is_onion_host(next_url):
                                 return {
-                                    "url": final_url if is_onion_host(final_url) else url,
-                                    "status": "dead",
-                                    "err": "too_large",
+                                    "url": next_url,
+                                    "status": "filtered",
+                                    "reason": "redirect to clearnet disallowed",
                                     "ts": now_ts,
                                     "lang": "en",
                                     "category": "other",
                                 }
-
-                            raw_bytes = b"".join(chunks)
-                            if len(raw_bytes) < 300:
-                                return {
-                                    "url": final_url if is_onion_host(final_url) else url,
-                                    "status": "dead",
-                                    "code": last_code,
-                                    "ts": now_ts,
-                                    "lang": "en",
-                                    "category": "other",
-                                }
-
-                            html = raw_bytes.decode("utf-8", errors="replace")
-                            break
-                    else:
-                        res = client.get(cur_url, headers=headers)
-                        if asyncio.iscoroutine(res):
-                            r = await res
-                        elif hasattr(res, "__aenter__"):
-                            async with res as r_cm:
-                                r = r_cm
-                        else:
-                            r = res
+                            cur_url = next_url
+                            redirect_count += 1
+                            continue
 
                         final_url = str(getattr(r, "url", cur_url))
-                        last_code = getattr(r, "status_code", 200)
-                        text = getattr(r, "text", "")
-                        if asyncio.iscoroutine(text):
-                            text = await text
-
-                        if len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
-                            return {
-                                "url": final_url if is_onion_host(final_url) else url,
-                                "status": "dead",
-                                "err": "too_large",
-                                "ts": now_ts,
-                                "lang": "en",
-                                "category": "other",
-                            }
-
                         if last_code in (429, 503) and attempt < self.max_retries:
+                            retry_delay = (2**attempt) * 1.5
                             break
 
-                        if last_code != 200 or len(text) < 300:
+                        if last_code in (500, 502, 504) and attempt < self.max_retries:
+                            retry_delay = 2**attempt
+                            break
+
+                        if last_code != 200:
                             return {
                                 "url": final_url if is_onion_host(final_url) else url,
                                 "status": "dead",
@@ -796,10 +741,44 @@ class OnionFetcher:
                                 "category": "other",
                             }
 
-                        html = text
+                        chunks = []
+                        downloaded = 0
+                        async for chunk in r.aiter_bytes():
+                            downloaded += len(chunk)
+                            if downloaded > MAX_RESPONSE_BYTES:
+                                too_large = True
+                                break
+                            chunks.append(chunk)
+
+                        if too_large:
+                            return {
+                                "url": final_url if is_onion_host(final_url) else url,
+                                "status": "dead",
+                                "err": "too_large",
+                                "ts": now_ts,
+                                "lang": "en",
+                                "category": "other",
+                            }
+
+                        raw_bytes = b"".join(chunks)
+                        if len(raw_bytes) < 300:
+                            return {
+                                "url": final_url if is_onion_host(final_url) else url,
+                                "status": "dead",
+                                "code": last_code,
+                                "ts": now_ts,
+                                "lang": "en",
+                                "category": "other",
+                            }
+
+                        html = raw_bytes.decode("utf-8", errors="replace")
                         break
 
-                if html is not None or too_large:
+                if retry_delay is not None:
+                    await asyncio.sleep(retry_delay)
+                    continue
+
+                if html is not None:
                     break
 
             except Exception as e:

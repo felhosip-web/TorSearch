@@ -14,6 +14,11 @@
   - Dinamikus `allow_clearnet` szinkronizáció a felületről az `OnionFetcher`-be szálbiztos `set_allow_clearnet` metódussal és nyomon követéssel.
   - Szigorú `is_onion_host` domain ellenőrzés és URL feloldás (`urljoin`) a hamis `.onion` aldomainek (pl. `onion.example.com`) és relatív átirányítások biztonságos szűrésére.
 
+### Javítva
+- Exponenciális backoff várakozás és 5xx kódok újrapróbálásának visszaállítása az `async_fetch_page_httpx` ágban.
+- `RobotsChecker.is_allowed` hívások áthelyezése `asyncio.to_thread`-re a nem blokkoló event loop működés érdekében.
+- Duck-typing tartalék ág (`client.get`) törlése az `async_fetch_page_httpx`-ből a szigorú stream interfész javára.
+
 ## [5.0.0] - 2026-10-20
 
 ### Hozzáadva

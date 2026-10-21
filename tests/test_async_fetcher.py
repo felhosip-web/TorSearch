@@ -20,13 +20,7 @@ import pytest
 
 from onion_search.config import AppConfig, ConfigManager
 from onion_search.core.fetcher import OnionFetcher, DomainRateLimiter
-
-
-class MockResponse:
-    def __init__(self, status_code=200, text=""):
-        self.status_code = status_code
-        self.text = text
-        self.url = "http://testonion1234567890abcdef.onion"
+from tests.fakes import FakeAsyncClient, FakeStreamResponse
 
 
 def test_appconfig_async_mode_default():
@@ -96,31 +90,10 @@ def test_fetch_url_fallback_on_async_exception(monkeypatch):
 def test_async_fetch_page_httpx_success():
     """Verify async_fetch_page_httpx successfully fetches and parses page content."""
     fetcher = OnionFetcher()
-
-    sample_html = b"<html><head><title>Test Onion Page</title></head><body>" + b"Content for testing onion page " * 20 + b"</body></html>"
-
-    class AsyncChunkStream:
-        def __init__(self, chunks, status_code=200):
-            self.status_code = status_code
-            self.headers = {}
-            self.url = "http://testonion1234567890abcdef.onion"
-            self._chunks = chunks
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-        async def aiter_bytes(self):
-            for c in self._chunks:
-                yield c
-
-    mock_client = MagicMock()
-    mock_client.stream = MagicMock(return_value=AsyncChunkStream([sample_html], status_code=200))
+    fake_client = FakeAsyncClient(FakeStreamResponse(status_code=200))
 
     async def _test():
-        return await fetcher.async_fetch_page_httpx(mock_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
+        return await fetcher.async_fetch_page_httpx(fake_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
 
     res = asyncio.run(_test())
 
@@ -131,27 +104,10 @@ def test_async_fetch_page_httpx_success():
 def test_async_fetch_page_httpx_dead_link():
     """Verify async_fetch_page_httpx handles HTTP 404 / dead link appropriately."""
     fetcher = OnionFetcher(max_retries=0)
-
-    class AsyncChunkStream404:
-        def __init__(self):
-            self.status_code = 404
-            self.headers = {}
-            self.url = "http://testonion1234567890abcdef.onion"
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-        async def aiter_bytes(self):
-            yield b"Not Found"
-
-    mock_client = MagicMock()
-    mock_client.stream = MagicMock(return_value=AsyncChunkStream404())
+    fake_client = FakeAsyncClient(FakeStreamResponse(status_code=404, content_chunks=[b"Not Found"]))
 
     async def _test():
-        return await fetcher.async_fetch_page_httpx(mock_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
+        return await fetcher.async_fetch_page_httpx(fake_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050")
 
     res = asyncio.run(_test())
 
@@ -215,3 +171,110 @@ def test_socks5h_proxy_preservation(monkeypatch):
 
     assert res["status"] == "ok"
     assert captured_kwargs.get("proxy") == "socks5h://127.0.0.1:9050"
+
+
+def test_async_fetch_429_backoff_retry():
+    """a) Verify 429 then 200 response triggers asyncio.sleep((2**0)*1.5) = 1.5s and parses successfully."""
+    fetcher = OnionFetcher(max_retries=2, domain_delay=0.0)
+    fake_client = FakeAsyncClient([
+        FakeStreamResponse(status_code=429),
+        FakeStreamResponse(status_code=200),
+    ])
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        res = asyncio.run(fetcher.async_fetch_page_httpx(
+            fake_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050"
+        ))
+
+        assert res["status"] == "ok"
+        mock_sleep.assert_called_once_with(1.5)
+
+
+def test_async_fetch_502_backoff_retry():
+    """b) Verify 502 -> 502 -> 200 response triggers backoff sleeps (1.0s and 2.0s) and parses successfully."""
+    fetcher = OnionFetcher(max_retries=2, domain_delay=0.0)
+    fake_client = FakeAsyncClient([
+        FakeStreamResponse(status_code=502),
+        FakeStreamResponse(status_code=502),
+        FakeStreamResponse(status_code=200),
+    ])
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        res = asyncio.run(fetcher.async_fetch_page_httpx(
+            fake_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050"
+        ))
+
+        assert res["status"] == "ok"
+        assert mock_sleep.call_count == 2
+        assert mock_sleep.call_args_list == [
+            ((1.0,), {}),
+            ((2.0,), {}),
+        ]
+
+
+def test_async_fetch_persistent_503_exhaustion():
+    """c) Verify persistent 503 error exhausts max_retries, returning 'dead' status and code 503."""
+    fetcher = OnionFetcher(max_retries=2, domain_delay=0.0)
+    fake_client = FakeAsyncClient([
+        FakeStreamResponse(status_code=503),
+        FakeStreamResponse(status_code=503),
+        FakeStreamResponse(status_code=503),
+    ])
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        res = asyncio.run(fetcher.async_fetch_page_httpx(
+            fake_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050"
+        ))
+
+        assert res["status"] == "dead"
+        assert res.get("code") == 503
+        assert mock_sleep.call_count == 2
+
+
+def test_async_fetch_non_blocking_robots_check():
+    """d) Verify respect_robots=True executes RobotsChecker.is_allowed via asyncio.to_thread without blocking event loop."""
+    import time
+    fetcher = OnionFetcher(respect_robots=True)
+    fake_client = FakeAsyncClient(FakeStreamResponse(status_code=200))
+
+    def _blocking_is_allowed(url, sess=None, proxy_url=None, allow_clearnet=False):
+        time.sleep(0.3)
+        return True
+
+    ticker_ticks = 0
+
+    async def _ticker():
+        nonlocal ticker_ticks
+        for _ in range(5):
+            await asyncio.sleep(0.05)
+            ticker_ticks += 1
+
+    async def _test():
+        with patch.object(fetcher.robots_checker, "is_allowed", side_effect=_blocking_is_allowed):
+            fetch_task = asyncio.create_task(fetcher.async_fetch_page_httpx(
+                fake_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050"
+            ))
+            ticker_task = asyncio.create_task(_ticker())
+            res, _ = await asyncio.gather(fetch_task, ticker_task)
+            return res
+
+    res = asyncio.run(_test())
+    assert res["status"] == "ok"
+    assert ticker_ticks >= 3  # Proves event loop continued running concurrently!
+
+
+def test_async_fetch_redirect_filtering():
+    """e) Verify redirect to onion.example.com under allow_clearnet=False returns 'filtered' without sending second request."""
+    fetcher = OnionFetcher(allow_clearnet=False)
+    redirect_resp = FakeStreamResponse(status_code=302, headers={"Location": "http://onion.example.com/login"})
+    fake_client = FakeAsyncClient([redirect_resp])
+
+    async def _test():
+        return await fetcher.async_fetch_page_httpx(
+            fake_client, "http://testonion1234567890abcdef.onion", proxy_url="socks5h://127.0.0.1:9050"
+        )
+
+    res = asyncio.run(_test())
+    assert res["status"] == "filtered"
+    assert "redirect to clearnet disallowed" in res.get("reason", "")
+    assert len(fake_client.calls) == 1  # No second request sent!
